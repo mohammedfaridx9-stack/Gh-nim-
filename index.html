@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl" data-theme="dark">
+<head>
+<!--
+  ============================================================================
+  Control · Ghønim  —  Smart Industrial Dashboard  |  لوحة التحكم الصناعية الذكية
+  تم التصميم والبرمجة بواسطة المهندس / محمد غنيم
+  Developed & Engineered by Mohamed Ghonim
+  ----------------------------------------------------------------------------
+  Target: ROJ DART (90W) yarn feeder + STIRO G2D / Stela G2D machines
+  MCU   : ESP32 DevKit V1 (isolated via PC817, powered by L7805 + 10uF/0.1uF)
+
+  PROTOCOL (JSON, one object per message, ESP32 -> App), all keys optional:
+    {"power":1,"yarn":1,"yarnCount":0,"rpm":1200,"temp":31.5,"hum":48,
+     "fan":0,"fanMode":"auto","fanOk":1,"vin":11.8,"vout":5.02,"opto":1}
+      yarn: 1 = intact, 0 = broken   opto: 1 = isolation healthy   temp: always Celsius
+  App -> ESP32:
+    {"cmd":"power","value":1}
+    {"cmd":"lcd","line1":"Hello","line2":"World"}
+    {"cmd":"fan","mode":"auto|manual","value":0|1,"threshold":35,"hyst":2}
+    {"cmd":"buzzer","value":1|0}                       (Active Buzzer ON/OFF)
+    {"cmd":"alerts","buzzer":1,"rpmEn":1,"rpmMin":800,"rpmMax":1800,
+     "tempEn":1,"tempMin":10,"tempMax":45,"humEn":1,"humMin":20,"humMax":80,
+     "yarnEn":1,"fanEn":1,"powerEn":1}                 (sent on connect + on every change)
+  Transports:
+    Wi-Fi WebSocket : ws://<ESP32_IP>:81/
+    Wi-Fi HTTP      : GET http://<ESP32_IP>/status (JSON), POST /cmd (JSON)
+    Bluetooth (BLE) : Nordic UART Service 6e400001-b5a3-f393-e0a9-e50e24dcca9e
+                      (RX 6e400002..., TX 6e400003...), newline-terminated JSON
+  Note: Web Bluetooth / PWA install require HTTPS (or localhost).
+  ============================================================================
+-->
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b1220" id="metaTheme">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Control">
+<meta name="author" content="Mohamed Ghonim">
+<title>Control · Ghønim</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;800&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+<style>
+/* Designed & Programmed by Eng. Mohamed Ghonim */
+:root{--acc:#38bdf8;--acc2:#a78bfa;--on:#04101f;--r:18px;--pad:14px;--gap:12px;--blur:10px;
+--bg:#0b1220;--bg1:#1b2a4d;--bg2:#2a1b4d;--card:rgba(255,255,255,.06);--bd:rgba(255,255,255,.12);--tx:#e8eefc;--mut:#8fa0c2;
+--panel:#0e1730;--hdr:rgba(11,18,32,.78);--inp:rgba(0,0,0,.3);--track:#1b2542;--shadow:rgba(0,0,0,.25);
+--ok:#22d3a0;--warn:#fbbf24;--bad:#fb5a6b}
+[data-theme=light]{--bg:#eef2fa;--bg1:#d6e4ff;--bg2:#eddcff;--card:rgba(255,255,255,.78);--bd:rgba(20,30,60,.13);--tx:#111a33;--mut:#5a6784;
+--panel:#ffffff;--hdr:rgba(255,255,255,.82);--inp:rgba(20,30,60,.06);--track:#dbe2f1;--shadow:rgba(40,60,110,.14);--ok:#0b8f6a;--warn:#a96b00;--bad:#d6334a}
+[data-theme=amoled]{--bg:#000;--bg1:#000;--bg2:#000;--card:rgba(255,255,255,.05);--bd:rgba(255,255,255,.15);--panel:#070707;--hdr:rgba(0,0,0,.85);--track:#161616;--inp:rgba(255,255,255,.07)}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html{font-size:16px}
+body{font-family:'Cairo',system-ui,sans-serif;background:radial-gradient(1200px 600px at 80% -10%,var(--bg1) 0,transparent 60%),radial-gradient(900px 500px at -10% 110%,var(--bg2) 0,transparent 55%),var(--bg);background-attachment:fixed;color:var(--tx);min-height:100vh;padding-bottom:88px;transition:background .3s,color .3s}
+body.notab{padding-bottom:24px}
+body.solid{--blur:0px}body.solid .card{background:var(--panel)}
+body.compact{--pad:10px;--gap:8px}body.compact main{padding:10px}
+body.noanim *{animation:none!important;transition:none!important}
+.sub{display:block;font-size:.78em;font-weight:400;opacity:.72;line-height:1.35}
+header{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:8px;padding:8px 12px;padding-top:calc(8px + env(safe-area-inset-top));background:var(--hdr);backdrop-filter:blur(14px);border-bottom:1px solid var(--bd)}
+.ibtn{background:var(--card);border:1px solid var(--bd);color:var(--tx);border-radius:12px;width:40px;height:40px;font-size:1.1rem;cursor:pointer;flex:none}
+.ttl{flex:1;min-width:0;line-height:1.25}.brandrow{display:flex;align-items:center;gap:7px}
+.brandrow b{font-size:1.15rem;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chip{font-size:.68rem;font-weight:800;padding:2px 8px;border-radius:99px;background:linear-gradient(135deg,var(--acc),var(--acc2));color:var(--on);letter-spacing:.3px;white-space:nowrap}
+.ttl small{color:var(--acc);font-size:.62rem;display:block}
+.pill{display:flex;align-items:center;gap:6px;padding:7px 11px;border-radius:99px;border:1px solid var(--bd);background:var(--card);font-size:.72rem;cursor:pointer;color:var(--tx);flex:none;font-family:inherit}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--bad);box-shadow:0 0 8px currentColor;color:var(--bad)}
+.dot.on{background:var(--ok);color:var(--ok)}.dot.demo{background:var(--warn);color:var(--warn)}
+main{max-width:980px;margin:auto;padding:14px}
+.view{display:none;animation:fade .3s}.view.show{display:block}
+@keyframes fade{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.grid{display:grid;gap:var(--gap);grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:var(--r);padding:var(--pad);backdrop-filter:blur(var(--blur));box-shadow:0 8px 30px var(--shadow);transition:border-color .2s,transform .2s,background .3s}
+.card[hidden]{display:none}
+.card h3{font-size:.88rem;color:var(--mut);display:flex;align-items:center;gap:8px;margin-bottom:10px;font-weight:600}
+.tap{cursor:pointer}.tap:active{transform:scale(.98)}.tap:hover{border-color:var(--acc)}
+.big{font-size:2.1rem;font-weight:800;line-height:1.2}.unit{font-size:.88rem;color:var(--mut);margin-inline-start:4px}
+.row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.badge{padding:3px 10px;border-radius:99px;font-size:.75rem;font-weight:600;display:inline-block}
+.b-ok{background:color-mix(in srgb,var(--ok) 16%,transparent);color:var(--ok)}.b-bad{background:color-mix(in srgb,var(--bad) 18%,transparent);color:var(--bad)}.b-warn{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
+.btn{background:linear-gradient(135deg,var(--acc),var(--acc2));border:0;color:var(--on);font-weight:800;font-family:inherit;padding:10px 16px;border-radius:calc(var(--r) * .7);cursor:pointer;font-size:.88rem;transition:transform .15s,opacity .2s}
+.btn:active{transform:scale(.97)}
+.btn.ghost{background:var(--card);color:var(--tx);border:1px solid var(--bd)}
+.btn.red{background:linear-gradient(135deg,#fb5a6b,#f97316);color:#fff}
+.switch{position:relative;width:86px;height:44px;border-radius:99px;background:var(--track);border:1px solid var(--bd);cursor:pointer;transition:.3s;flex:none}
+.switch::after{content:'';position:absolute;top:4px;inset-inline-start:4px;width:34px;height:34px;border-radius:50%;background:#fff;transition:.3s;box-shadow:0 2px 6px rgba(0,0,0,.3)}
+.switch.on{background:linear-gradient(135deg,#10b981,var(--ok));box-shadow:0 0 18px color-mix(in srgb,var(--ok) 50%,transparent)}
+.switch.on::after{inset-inline-start:46px}
+.switch.sm{width:54px;height:30px}.switch.sm::after{width:22px;height:22px;top:3px;inset-inline-start:3px}.switch.sm.on::after{inset-inline-start:27px}
+.master{display:flex;align-items:center;justify-content:space-between}
+input[type=text],input[type=number]{width:100%;background:var(--inp);border:1px solid var(--bd);color:var(--tx);border-radius:10px;padding:10px;font-family:inherit;font-size:.95rem;margin:6px 0}
+input.num{width:92px;margin:0;text-align:center}input.txt{width:150px;margin:0}
+input[type=range]{accent-color:var(--acc);width:130px}
+.lcd{background:#1f3a1b;border:4px solid #0d1a0c;border-radius:10px;padding:12px;font-family:'Courier New',monospace;direction:ltr;color:#b6ff7a;text-shadow:0 0 6px #7dff3a;font-size:clamp(14px,4.4vw,22px);letter-spacing:2px;margin:8px 0;box-shadow:inset 0 0 20px rgba(0,0,0,.6)}
+.lcd div{white-space:pre;height:1.4em}
+.fan{width:46px;height:46px;border-radius:50%;border:3px solid var(--acc);border-top-color:transparent;border-bottom-color:transparent;flex:none}
+.fan.spin{animation:sp .5s linear infinite}@keyframes sp{to{transform:rotate(360deg)}}
+.seg{display:inline-flex;border:1px solid var(--bd);border-radius:12px;overflow:hidden;flex-wrap:wrap}
+.seg button{background:transparent;border:0;color:var(--mut);padding:7px 12px;font-family:inherit;cursor:pointer;font-size:.82rem;transition:background .2s}
+.seg button.a{background:var(--acc);color:var(--on);font-weight:700}
+.back{margin-bottom:12px}.back::before{content:'→ '}[dir=ltr] .back::before{content:'← '}
+canvas{max-width:100%}
+.chartbox{height:220px;position:relative}
+table{width:100%;border-collapse:collapse;font-size:.82rem}th,td{padding:7px 6px;border-bottom:1px solid var(--bd);text-align:start}th{color:var(--mut);font-weight:600}
+.scroll{max-height:240px;overflow:auto}
+.drawer{position:fixed;inset:0;z-index:50;visibility:hidden}.drawer.open{visibility:visible}
+.drawer .bg{position:absolute;inset:0;background:rgba(0,0,0,.55);opacity:0;transition:opacity .25s}.drawer.open .bg{opacity:1}
+.drawer nav{position:absolute;top:0;bottom:0;inset-inline-start:0;width:290px;max-width:84%;background:var(--panel);border-inline-end:1px solid var(--bd);padding:18px;display:flex;flex-direction:column;gap:4px;overflow:auto;transform:translateX(100%);transition:transform .28s}
+[dir=ltr] .drawer nav{transform:translateX(-100%)}
+.drawer.open nav{transform:none}
+.drawer nav h2{display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:1.2rem}
+.drawer nav a{display:flex;align-items:center;gap:10px;padding:11px;border-radius:12px;cursor:pointer;color:var(--tx);font-size:.92rem}.drawer nav a:hover{background:var(--card)}
+.drawer nav a i{font-style:normal;width:1.4em;text-align:center}
+.sig{margin-top:auto;font-size:.72rem;color:var(--mut);border-top:1px solid var(--bd);padding-top:12px;line-height:1.7}.sig b{color:var(--acc)}
+footer{text-align:center;color:var(--mut);font-size:.72rem;padding:18px 10px 6px;line-height:1.8}footer b{color:var(--acc)}
+.modal{position:fixed;inset:0;z-index:60;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;padding:14px}
+.modal.open{display:flex}.modal .card{width:100%;max-width:420px;background:var(--panel)}
+.modal .btn{width:100%;margin-top:8px}
+.toast{position:fixed;bottom:92px;inset-inline:14px;margin:auto;max-width:420px;background:var(--panel);border:1px solid var(--bd);padding:12px;border-radius:12px;z-index:70;display:none;text-align:center;font-size:.88rem;box-shadow:0 8px 30px var(--shadow)}
+.tabbar{position:fixed;bottom:0;inset-inline:0;z-index:20;display:flex;justify-content:space-around;background:var(--hdr);backdrop-filter:blur(14px);border-top:1px solid var(--bd);padding:6px 2px calc(6px + env(safe-area-inset-bottom))}
+body.notab .tabbar{display:none}
+.tabbar a{flex:1;text-align:center;font-size:.62rem;color:var(--mut);padding:4px 1px;cursor:pointer;position:relative;line-height:1.25}.tabbar a i{display:block;font-style:normal;font-size:1.2rem}.tabbar a.a{color:var(--acc)}
+.tdot{position:absolute;top:0;inset-inline-end:20%;background:var(--bad);color:#fff;border-radius:99px;font-size:.62rem;font-weight:700;padding:0 6px;display:none}
+.alarm{position:sticky;top:calc(var(--hh,64px) + 6px);z-index:15;display:none;align-items:center;justify-content:space-between;gap:10px;background:rgba(251,90,107,.95);color:#fff;border-radius:14px;padding:10px 12px;margin-bottom:12px;font-weight:700;font-size:.82rem;line-height:1.7;animation:pulse 1s infinite;box-shadow:0 6px 24px rgba(251,90,107,.4)}
+@keyframes pulse{50%{box-shadow:0 0 22px rgba(251,90,107,.7)}}
+.alarm .btn{background:#fff;color:#b4182d;white-space:nowrap;padding:8px 12px}
+.card.alarming{border-color:var(--bad);box-shadow:0 0 22px color-mix(in srgb,var(--bad) 35%,transparent)}
+.lbl{flex:1;font-size:.75rem;color:var(--mut)}
+/* settings */
+.chips{display:flex;gap:8px;overflow-x:auto;padding:2px 2px 10px;margin-bottom:6px;scrollbar-width:none}.chips::-webkit-scrollbar{display:none}
+.chip2{flex:none;background:var(--card);border:1px solid var(--bd);color:var(--tx);border-radius:99px;padding:7px 13px;font-family:inherit;font-size:.78rem;cursor:pointer}
+.chip2:hover{border-color:var(--acc)}
+.opt{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid var(--bd)}
+.opt:last-child{border-bottom:0}
+.opt .tx{flex:1;min-width:0}.opt .tx b{display:block;font-size:.92rem;font-weight:600}.opt .tx small{color:var(--mut);font-size:.72rem;display:block;line-height:1.5}
+.rg{display:flex;align-items:center;gap:8px}.rv{font-size:.8rem;min-width:46px;text-align:end;color:var(--acc)}
+.sws{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;max-width:200px}
+.swc{width:30px;height:30px;border-radius:50%;border:2px solid transparent;cursor:pointer;padding:0}
+.swc.a{border-color:var(--tx);box-shadow:0 0 0 2px var(--bg)}
+input[type=color]{width:30px;height:30px;border:0;padding:0;background:none;border-radius:50%;cursor:pointer}
+.setsec{margin-bottom:var(--gap);scroll-margin-top:calc(var(--hh,64px) + 10px)}
+.setsec h3{font-size:.95rem;color:var(--tx)}
+#report{position:fixed;left:-10000px;top:0;width:760px;background:#fff;color:#111;padding:24px;font-family:'Cairo',Arial,sans-serif}
+#report table td,#report table th{border:1px solid #ccc;padding:5px;font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <button class="ibtn" id="menuBtn" aria-label="menu">☰</button>
+  <div class="ttl"><div class="brandrow"><b id="brand">Control</b><span class="chip">Ghønim</span></div><small data-i18n="sig_short"></small></div>
+  <button class="ibtn" data-go="settings" aria-label="settings">⚙️</button>
+  <button class="pill" id="connPill"><span class="dot" id="connDot"></span><span id="connTxt"></span></button>
+</header>
+
+<div class="drawer" id="drawer"><div class="bg" id="drawerBg"></div>
+<nav>
+  <h2><span id="brand2">Control</span><span class="chip">Ghønim</span></h2>
+  <a data-go="home"><i>🏠</i><span data-i18n="home"></span></a>
+  <a data-go="yarn"><i>🧵</i><span data-i18n="p_yarn"></span></a>
+  <a data-go="speed"><i>⚡</i><span data-i18n="p_speed"></span></a>
+  <a data-go="dht"><i>🌡️</i><span data-i18n="p_dht"></span></a>
+  <a data-go="power"><i>🔌</i><span data-i18n="p_power"></span></a>
+  <a data-go="alerts"><i>🔔</i><span data-i18n="alerts"></span></a>
+  <a data-go="settings"><i>⚙️</i><span data-i18n="settings"></span></a>
+  <a id="navConn"><i>📡</i><span data-i18n="n_conn"></span></a>
+  <a id="navPdf"><i>📄</i><span data-i18n="b_pdf"></span></a>
+  <a id="navCsv"><i>📊</i><span data-i18n="b_csv"></span></a>
+  <a id="navInstall" style="display:none"><i>📲</i><span data-i18n="n_install"></span></a>
+  <div class="sig">تم التصميم والبرمجة بواسطة<br><b>المهندس / محمد غنيم</b><br>Developed &amp; Engineered by<br><b>Mohamed Ghonim</b></div>
+</nav></div>
+
+<main>
+<div class="alarm" id="alarmBar"><div id="alarmList"></div><button class="btn" id="muteBtn"></button></div>
+
+<!-- HOME -->
+<section class="view show" id="v-home">
+  <div class="grid">
+    <div class="card master" data-card="master"><div><h3><i>🔘</i><span data-i18n="master_t"></span></h3><div id="pwTxt" class="big" style="font-size:1.4rem"></div><span class="badge b-ok" id="pwBadge"></span></div><div class="switch on" id="masterSw"></div></div>
+
+    <div class="card" data-card="lcd"><h3><i>🖥️</i><span data-i18n="lcd_t"></span></h3>
+      <div class="lcd"><div id="lcd1"></div><div id="lcd2"></div></div>
+      <input type="text" id="lcdIn" maxlength="32" data-i18n-ph="lcd_ph">
+      <div class="row"><small id="lcdCnt" style="color:var(--mut)">0/32</small><button class="btn" id="lcdSend" data-i18n="lcd_send"></button></div>
+      <small style="color:var(--mut);display:block;margin-top:6px" data-i18n="lcd_hint"></small></div>
+
+    <div class="card" data-card="fan"><h3><i>🌀</i><span data-i18n="fan_t"></span></h3>
+      <div class="row"><div class="fan" id="fanIcon"></div>
+      <div><div id="fanTxt" class="big" style="font-size:1.25rem"></div><small id="fanTemp" style="color:var(--mut)"></small></div>
+      <div class="switch" id="fanSw" style="width:74px"></div></div>
+      <div class="row" style="margin-top:12px"><div class="seg" id="fanSeg"><button data-m="auto" class="a" data-i18n="mode_auto"></button><button data-m="manual" data-i18n="mode_manual"></button></div>
+      <label class="lbl" style="display:flex;align-items:center;gap:6px;flex:none"><span data-i18n="thr_lbl"></span> <input class="num" type="number" id="thr" style="width:76px"><span class="tu"></span></label></div></div>
+  </div>
+
+  <h3 style="margin:16px 4px 8px;color:var(--mut)" data-i18n="sensors_h"></h3>
+  <div class="grid">
+    <div class="card tap" data-go="yarn" data-card="yarn"><h3><i>🧵</i><span data-i18n="yarn_c"></span></h3><div class="row"><div class="big" id="hYarn"></div><span class="badge b-ok" id="hYarnB"></span></div><small style="color:var(--mut)"><span data-i18n="breaks"></span>: <b id="hYarnC">0</b></small></div>
+    <div class="card tap" data-go="speed" data-card="speed"><h3><i>⚡</i><span data-i18n="speed_c"></span></h3><div class="big"><span id="hRpm">0</span><span class="unit">RPM</span></div><small style="color:var(--mut)"><span data-i18n="pull"></span>: <b id="hPull">0</b> <span data-i18n="mmin"></span></small></div>
+    <div class="card tap" data-go="dht" data-card="dht"><h3><i>🌡️</i><span data-i18n="dht_c"></span></h3><div class="big"><span id="hTemp">--</span><span class="unit tu"></span> <span style="font-size:1.2rem"><span id="hHum">--</span>%</span></div><small style="color:var(--mut)" data-i18n="rh"></small></div>
+    <div class="card tap" data-go="power" data-card="power"><h3><i>🔌</i><span data-i18n="power_c"></span></h3><div class="big"><span id="hVout">5.00</span><span class="unit">V</span></div><span class="badge b-ok" id="hOpto"></span></div>
+    <div class="card tap" data-go="alerts" data-card="alerts"><h3><i>🔔</i><span data-i18n="al_c"></span></h3><div class="big" id="hAlCnt">0</div><span class="badge b-ok" id="hAlB"></span></div>
+  </div>
+</section>
+
+<!-- YARN -->
+<section class="view" id="v-yarn"><button class="btn ghost back" data-go="home" data-i18n="back"></button>
+  <div class="grid">
+    <div class="card"><h3><i>🧵</i><span data-i18n="y_state"></span></h3><div class="big" id="yState"></div><span class="badge b-ok" id="yBadge"></span></div>
+    <div class="card"><h3><i>🔢</i><span data-i18n="y_count"></span></h3><div class="big" id="yCount">0</div><div class="row" style="margin-top:8px"><button class="btn ghost" id="yReset" data-i18n="reset"></button></div></div>
+  </div>
+  <div class="card" style="margin-top:12px"><h3><i>🕒</i><span data-i18n="y_log"></span></h3><div class="scroll"><table><thead><tr><th>#</th><th data-i18n="time"></th><th>RPM</th></tr></thead><tbody id="yLog"></tbody></table></div></div>
+</section>
+
+<!-- SPEED -->
+<section class="view" id="v-speed"><button class="btn ghost back" data-go="home" data-i18n="back"></button>
+  <div class="grid">
+    <div class="card"><h3><i>⏱️</i><span data-i18n="gauge_t"></span></h3><canvas id="gauge" width="300" height="180" style="display:block;margin:auto"></canvas></div>
+    <div class="card"><h3><i>📏</i><span data-i18n="meas_t"></span></h3><div class="big"><span id="sRpm">0</span><span class="unit">RPM</span></div><div class="big" style="margin-top:6px"><span id="sPull">0</span><span class="unit" data-i18n="pull_full"></span></div><small style="color:var(--mut)"><span data-i18n="roller_note"></span>: <b id="rollerNote"></b> mm</small></div>
+  </div>
+  <div class="card" style="margin-top:12px" data-chart="speed"><h3><i>📈</i><span data-i18n="chart_speed"></span></h3><div class="chartbox"><canvas id="cSpeed"></canvas></div></div>
+</section>
+
+<!-- DHT -->
+<section class="view" id="v-dht"><button class="btn ghost back" data-go="home" data-i18n="back"></button>
+  <div class="grid">
+    <div class="card"><h3><i>🌡️</i><span data-i18n="temp_t"></span></h3><div class="big"><span id="dTemp">--</span><span class="unit tu"></span></div><span class="badge b-ok" id="dBadge"></span></div>
+    <div class="card"><h3><i>💧</i><span data-i18n="hum_t"></span></h3><div class="big"><span id="dHum">--</span><span class="unit">%</span></div><small style="color:var(--mut)"><span data-i18n="fan_state"></span>: <b id="dFan"></b> (<span data-i18n="auto_at"></span> <b id="dThr">35</b><span class="tu"></span>)</small></div>
+  </div>
+  <div class="card" style="margin-top:12px" data-chart="dht"><h3><i>📊</i><span data-i18n="chart_dht"></span></h3><div class="chartbox"><canvas id="cDht"></canvas></div></div>
+</section>
+
+<!-- POWER -->
+<section class="view" id="v-power"><button class="btn ghost back" data-go="home" data-i18n="back"></button>
+  <div class="grid">
+    <div class="card"><h3><i>🔋</i><span data-i18n="vin_t"></span></h3><div class="big"><span id="pVin">--</span><span class="unit">V</span></div></div>
+    <div class="card"><h3><i>🎯</i><span data-i18n="vout_t"></span></h3><div class="big"><span id="pVout">--</span><span class="unit">V</span></div><span class="badge b-ok" id="pStab"></span><div style="margin-top:10px;height:10px;background:var(--track);border-radius:9px;overflow:hidden"><div id="pBar" style="height:100%;width:100%;background:var(--ok);transition:width .3s"></div></div></div>
+    <div class="card"><h3><i>🛡️</i><span data-i18n="opto_t"></span></h3><div class="row" style="flex-wrap:nowrap;justify-content:flex-start"><div id="pOptoLed" style="width:22px;height:22px;border-radius:50%;flex:none"></div><b id="pOpto"></b></div><small style="color:var(--mut);display:block;margin-top:8px" data-i18n="caps"></small></div>
+  </div>
+  <div class="card" style="margin-top:12px" data-chart="volt"><h3><i>📈</i><span data-i18n="chart_volt"></span></h3><div class="chartbox"><canvas id="cVolt"></canvas></div></div>
+</section>
+
+<!-- ALERTS -->
+<section class="view" id="v-alerts"><button class="btn ghost back" data-go="home" data-i18n="back"></button>
+  <div class="grid">
+    <div class="card"><h3><i>🚨</i><span data-i18n="al_buzzer"></span></h3>
+      <div class="row"><b id="bzState"></b><div class="switch on" id="bzSw" style="width:74px"></div></div>
+      <div class="row" style="margin-top:12px"><button class="btn ghost" id="bzTest" data-i18n="a_test"></button><button class="btn ghost" id="bzMute" data-i18n="a_mutebtn"></button></div>
+      <small style="color:var(--mut);display:block;margin-top:10px" data-i18n="al_buzzer_d"></small></div>
+    <div class="card"><h3><i>⚙️</i><span data-i18n="al_mgmt"></span></h3>
+      <div class="row"><button class="btn" id="alSend" data-i18n="a_send"></button><button class="btn ghost" id="alReset" data-i18n="a_defaults"></button></div>
+      <small style="color:var(--mut);display:block;margin-top:10px" data-i18n="al_mgmt_d"></small></div>
+  </div>
+  <h3 style="margin:16px 4px 8px;color:var(--mut)" data-i18n="al_sensors"></h3>
+  <div class="grid" id="alCards"></div>
+  <div class="card" style="margin-top:12px"><h3><i>🧪</i><span data-i18n="al_test"></span></h3>
+    <div class="row"><button class="btn ghost" id="tHeat"></button><button class="btn ghost" id="tFan"></button><button class="btn ghost" id="tSlow"></button><button class="btn ghost" id="tYarn"></button></div></div>
+</section>
+
+<!-- SETTINGS -->
+<section class="view" id="v-settings"><button class="btn ghost back" data-go="home" data-i18n="back"></button>
+  <div class="chips" id="setChips"></div>
+  <div id="setBody"></div>
+</section>
+
+<footer>© Control <b>Ghønim</b> — تم التصميم والبرمجة بواسطة المهندس / <b>محمد غنيم</b><br>Developed &amp; Engineered by <b>Mohamed Ghonim</b></footer>
+</main>
+
+<div class="tabbar" id="tabbar">
+  <a class="a" data-go="home"><i>🏠</i><span data-i18n="home"></span></a>
+  <a data-go="yarn"><i>🧵</i><span data-i18n="yarn"></span></a>
+  <a data-go="speed"><i>⚡</i><span data-i18n="speed"></span></a>
+  <a data-go="dht"><i>🌡️</i><span data-i18n="climate"></span></a>
+  <a data-go="power"><i>🔌</i><span data-i18n="power"></span></a>
+  <a data-go="alerts"><i>🔔</i><span data-i18n="alerts"></span><b class="tdot" id="tabBadge">0</b></a>
+</div>
+
+<div class="modal" id="connModal"><div class="card"><h3><i>📡</i><span data-i18n="conn_t"></span></h3>
+  <input type="text" id="ipIn" dir="ltr" data-i18n-ph="ip_ph">
+  <button class="btn" id="cWs">Wi-Fi · WebSocket</button>
+  <button class="btn" id="cHttp">Wi-Fi · HTTP</button>
+  <button class="btn" id="cBle">Bluetooth (BLE)</button>
+  <button class="btn ghost" id="cDemo" data-i18n="c_demo"></button>
+  <button class="btn red" id="cOff" data-i18n="c_off"></button>
+  <button class="btn ghost" id="cClose" data-i18n="close"></button></div></div>
+<div class="toast" id="toast"></div>
+<div id="report"></div>
+
+<script>
+/* ============================================================================
+   Control · Ghønim — Application Logic
+   تم التصميم والبرمجة بواسطة المهندس / محمد غنيم
+   Developed & Engineered by Mohamed Ghonim
+   ============================================================================ */
+const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const LS={get(k,d){try{const v=localStorage.getItem(k);return v?JSON.parse(v):d}catch(e){return d}},set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
+
+/* ---------- preferences (every option has a real effect) ---------- */
+const PD={theme:'dark',accent:'ocean',accentCustom:'#38bdf8',glass:true,fs:100,radius:18,density:'comfy',anim:true,tabbar:true,
+  lang:'ar',name:'',cards:{master:true,lcd:true,fan:true,yarn:true,speed:true,dht:true,power:true,alerts:true},charts:{speed:true,dht:true,volt:true},
+  tunit:'C',roller:40,gaugeMax:3000,hyst:2,lcdAscii:true,
+  vol:60,repeat:2,vibrate:true,notif:false,wake:false,
+  startMode:'demo',reconnect:true,pollMs:1000,lastMode:'',lastIp:'',
+  demoBreaks:true,demoRpm:1200,points:60,logEvery:5,logMax:300};
+function merge(d,s){const o={...d};for(const k in s){if(!(k in d))continue;if(d[k]&&typeof d[k]==='object'&&s[k]&&typeof s[k]==='object')o[k]=merge(d[k],s[k]);else o[k]=s[k]}return o}
+let P=merge(PD,LS.get('kreativ_prefs',{}));
+const getP=p=>p.split('.').reduce((o,k)=>o[k],P);
+function setP(p,v){const a=p.split('.');let o=P;while(a.length>1)o=o[a.shift()];o[a[0]]=v;LS.set('kreativ_prefs',P)}
+
+/* ---------- i18n: Arabic / English / both ---------- */
+const DICT={
+ home:['الرئيسية','Home'],yarn:['الخيط','Yarn'],speed:['السرعة','Speed'],climate:['الجو','Climate'],power:['الطاقة','Power'],alerts:['التنبيهات','Alerts'],settings:['الإعدادات','Settings'],
+ sig_short:['تصميم وبرمجة: م. محمد غنيم','Engineered by Mohamed Ghonim'],
+ n_conn:['الاتصال بالمتحكم','Connect to controller'],n_install:['تثبيت التطبيق','Install app'],
+ p_yarn:['حساس قطع الخيط','Yarn-break sensor'],p_speed:['حساس السرعة','Speed sensor'],p_dht:['الحرارة والرطوبة','Temp & humidity'],p_power:['الطاقة والعزل','Power & isolation'],
+ back:['العودة للرئيسية','Back to Home'],close:['إغلاق','Close'],reset:['تصفير','Reset'],time:['الوقت','Time'],
+ master_t:['المفتاح الرئيسي','Master switch'],running:['قيد التشغيل','Running'],stopped:['متوقف','Stopped'],confirmed:['مؤكد','Confirmed'],
+ lcd_t:['شاشة LCD 16x2 (I2C)','LCD 16x2 (I2C)'],lcd_ph:['اكتب رسالة (حتى 32 حرفاً)','Type a message (max 32 chars)'],lcd_send:['إرسال إلى الشاشة','Send to LCD'],
+ lcd_hint:['الشاشة تدعم الحروف الإنجليزية والأرقام (سطران × 16)','Screen supports English letters & digits (2 × 16)'],
+ fan_t:['مروحة التبريد (مرحل 5V)','Cooling fan (5V relay)'],fan_on:['تعمل','Running'],fan_off:['متوقفة','Stopped'],mode_auto:['آلي','Auto'],mode_manual:['يدوي','Manual'],thr_lbl:['حد التشغيل','Turn-on at'],temp_now:['الحرارة','Temp'],
+ sensors_h:['الحساسات — اضغط للتفاصيل','Sensors — tap for details'],
+ yarn_c:['حساس قطع الخيط','Yarn-break sensor'],ok:['سليم','OK'],broken:['مقطوع','BROKEN'],breaks:['مرات الانقطاع','Breaks'],
+ speed_c:['حساس السرعة (Hall)','Speed sensor (Hall)'],pull:['سحب الخيط','Yarn pull'],mmin:['م/د','m/min'],
+ dht_c:['الحرارة والرطوبة','Temp & humidity'],rh:['رطوبة نسبية','Relative humidity'],
+ power_c:['الطاقة والعزل','Power & isolation'],iso_ok:['العزل سليم','Isolation OK'],iso_bad:['العزل معطّل','Isolation lost'],
+ al_c:['نظام التنبيهات والصافرة','Alerts & buzzer'],no_faults:['لا توجد أعطال','No faults'],
+ y_state:['حالة الخيط لحظياً','Live yarn status'],y_flow:['الخيط يمر طبيعياً','Yarn running normally'],y_cut:['⚠ الخيط مقطوع','⚠ Yarn is broken'],y_count:['عداد الانقطاعات','Break counter'],y_log:['سجل الانقطاعات','Break log'],none_breaks:['لا توجد انقطاعات','No breaks logged'],
+ gauge_t:['عداد السرعة','Speed gauge'],meas_t:['القياسات','Measurements'],pull_full:['م/دقيقة — سحب الخيط','m/min — yarn pull'],roller_note:['قطر بكرة السحب','Pull roller diameter'],chart_speed:['رسم بياني حي للسرعة','Live speed chart'],
+ temp_t:['درجة الحرارة','Temperature'],hum_t:['الرطوبة','Humidity'],normal:['طبيعية','Normal'],high:['مرتفعة','High'],fan_state:['المروحة','Fan'],auto_at:['تلقائي عند ≥','Auto at ≥'],chart_dht:['السجل التاريخي','History'],
+ vin_t:['دخل التغذية (9–12V)','Supply input (9–12V)'],vout_t:['خرج L7805 (5V DC)','L7805 output (5V DC)'],stable:['مستقر','Stable'],deviation:['انحراف','Deviation'],opto_t:['العزل الضوئي PC817','PC817 optocoupler'],
+ opto_ok:['العزل سليم — ESP32 محمي من تيار الموتور','Isolation OK — ESP32 protected from motor current'],opto_bad:['تحذير: العزل غير فعّال!','Warning: isolation inactive!'],
+ caps:['مكثفات الفلترة: 10µF + 0.1µF على خرج المنظم.','Filter caps: 10µF + 0.1µF on regulator output.'],chart_volt:['استقرار الجهد','Voltage stability'],
+ conn_t:['الاتصال بالمتحكم ESP32','Connect to ESP32'],ip_ph:['عنوان IP مثال: 192.168.4.1','IP address e.g. 192.168.4.1'],c_demo:['وضع المحاكاة (Demo)','Simulation (Demo)'],c_off:['قطع الاتصال','Disconnect'],
+ s_none:['غير متصل','Offline'],s_demo:['محاكاة','Demo'],s_ws:['متصل · WiFi','Online · WiFi'],s_http:['متصل · HTTP','Online · HTTP'],s_ble:['متصل · BT','Online · BT'],s_retry:['إعادة الاتصال…','Reconnecting…'],s_noresp:['لا استجابة','No response'],
+ /* alerts */
+ al_buzzer:['الصافرة (Active Buzzer)','Buzzer (active)'],al_buzzer_d:['تُطلق الصافرة فوراً عند تجاوز أي حد أو حدوث عطل، وتستمر حتى زوال السبب أو كتمها.','Sounds immediately when any limit is exceeded or a fault occurs, until cleared or muted.'],
+ a_test:['اختبار الصافرة','Test buzzer'],a_mutebtn:['كتم / إلغاء الكتم','Mute / unmute'],a_mute:['كتم الصافرة','Mute buzzer'],a_unmute:['إلغاء الكتم','Unmute'],
+ al_mgmt:['إدارة الإعدادات','Manage settings'],a_send:['إرسال للمتحكم','Send to controller'],a_defaults:['القيم الافتراضية','Defaults'],al_mgmt_d:['تُحفظ على هذا الجهاز وتُرسل للمتحكم عند الاتصال وعند أي تغيير.','Saved on this device and sent to the controller on connect and on every change.'],
+ al_sensors:['إعدادات كل حساس','Per-sensor settings'],al_test:['اختبار الأعطال (وضع المحاكاة فقط)','Fault tests (simulation only)'],
+ t_heat:['محاكاة ارتفاع الحرارة','Simulate overheating'],t_fan:['محاكاة عطل المروحة','Simulate fan fault'],t_slow:['محاكاة هبوط السرعة','Simulate speed drop'],t_yarn:['محاكاة قطع الخيط','Simulate yarn break'],t_stop:['إيقاف: ','Stop: '],
+ a_rpm:['سرعة اللف (RPM)','Winding speed (RPM)'],a_temp:['درجة الحرارة','Temperature'],a_hum:['الرطوبة','Humidity'],a_yarn:['قطع الخيط','Yarn break'],a_fan:['مروحة التبريد','Cooling fan'],a_power:['الطاقة والعزل','Power & isolation'],
+ ad_yarn:['تنبيه فوري عند انقطاع الخيط أثناء التشغيل.','Instant alert when the yarn breaks while running.'],
+ ad_fan:['عطل المروحة: بلاغ من المتحكم (fanOk=0)، أو تعمل ولا تنخفض الحرارة خلال 30 ثانية، أو متوقفة رغم ارتفاع الحرارة 3° فوق حد التشغيل.','Fan fault: controller report (fanOk=0), running 30 s without cooling, or stopped while temp is 3° above the turn-on limit.'],
+ ad_power:['فقدان العزل الضوئي PC817 أو انحراف خرج 5V أكثر من ±0.25V.','PC817 isolation lost, or 5V output off by more than ±0.25V.'],
+ a_enable:['تفعيل التنبيه','Enable alert'],a_sound:['صافرة لهذا الحساس','Buzzer for this sensor'],a_min:['الحد الأدنى','Minimum'],a_max:['الحد الأقصى','Maximum'],a_ok:['طبيعي','Normal'],a_off:['معطّل','Disabled'],a_alarm:['تنبيه!','ALARM!'],
+ bz_ready:['جاهزة','Ready'],bz_off:['الصافرة معطّلة','Buzzer disabled'],bz_on:['تُصدر إنذاراً 🔊','Alarming 🔊'],bz_muted:['مكتومة','Muted'],
+ /* settings */
+ sec_appearance:['المظهر والألوان','Appearance & colors'],o_theme:['السمة','Theme'],d_theme:['داكن أو فاتح أو أسود كامل (يوفر بطارية OLED) أو تلقائي حسب الهاتف','Dark, light, pure black (saves OLED battery) or follow the phone'],
+ th_dark:['داكن','Dark'],th_light:['فاتح','Light'],th_amoled:['أسود','Black'],th_auto:['تلقائي','Auto'],
+ o_accent:['لون التطبيق','App color'],d_accent:['يلوّن الأزرار والرسوم والمؤشرات','Colors buttons, charts and indicators'],ac_custom:['لون مخصص','Custom color'],
+ o_glass:['تأثير الزجاج','Glass effect'],d_glass:['تمويه خلف البطاقات؛ أوقفه لأداء أسرع','Blur behind cards; turn off for speed'],
+ o_fs:['حجم الخط','Font size'],d_fs:['يكبّر أو يصغّر كل النصوص','Scales all text'],o_radius:['استدارة الزوايا','Corner roundness'],d_radius:['استدارة البطاقات والأزرار','Roundness of cards and buttons'],
+ o_density:['كثافة العرض','Density'],d_density:['مريح أو مضغوط لعرض معلومات أكثر','Comfortable or compact to fit more'],dn_comfy:['مريح','Comfy'],dn_compact:['مضغوط','Compact'],
+ o_anim:['الحركات والانتقالات','Animations'],d_anim:['أوقفها لتقليل الحركة وتوفير البطارية','Off = less motion, saves battery'],o_tabbar:['الشريط السفلي','Bottom bar'],d_tabbar:['إظهار أو إخفاء شريط التنقل السفلي','Show or hide the bottom navigation bar'],
+ sec_language:['اللغة والاسم','Language & name'],o_lang:['لغة التطبيق','App language'],d_lang:['عربي أو إنجليزي أو الاثنان معاً في كل النصوص','Arabic, English, or both on every label'],lg_ar:['عربي','Arabic'],lg_en:['English','English'],lg_both:['الاثنان','Both'],
+ o_name:['اسم التطبيق','App name'],d_name:['الاسم في الشريط العلوي (يبقى Ghønim بجانبه)','Name in the top bar (Ghønim stays beside it)'],
+ sec_display:['إظهار / إخفاء العناصر','Show / hide items'],d_card:['إظهار البطاقة في الرئيسية','Show this card on Home'],d_chart:['إظهار الرسم البياني في صفحته','Show this chart on its page'],
+ sec_units:['الوحدات والماكينة','Units & machine'],o_tunit:['وحدة الحرارة','Temperature unit'],d_tunit:['تغيّر العرض والحدود في كل الصفحات','Changes display and limits everywhere'],
+ o_roller:['قطر بكرة السحب (مم)','Pull roller diameter (mm)'],d_roller:['لحساب سرعة سحب الخيط من RPM','Used to compute yarn pull speed from RPM'],
+ o_gmax:['أقصى قيمة للعداد (RPM)','Gauge maximum (RPM)'],d_gmax:['مقياس عداد السرعة','Scale of the speed gauge'],
+ o_hyst:['فارق إيقاف المروحة (°C)','Fan hysteresis (°C)'],d_hyst:['تتوقف المروحة الآلية عند انخفاض الحرارة بهذا القدر عن حد التشغيل','Auto fan stops when temp falls this far below the turn-on limit'],
+ o_ascii:['LCD: حروف إنجليزية فقط','LCD: ASCII only'],d_ascii:['يحذف الحروف غير المدعومة قبل الإرسال للشاشة','Strips unsupported characters before sending to the LCD'],
+ sec_sound:['الصوت والإشعارات','Sound & notifications'],o_vol:['مستوى الصوت','Volume'],d_vol:['صوت صافرة التطبيق','Volume of the in-app buzzer sound'],
+ o_rep:['تكرار الصافرة (ثانية)','Beep repeat (s)'],d_rep:['الفاصل بين كل إنذار صوتي','Interval between alarm beeps'],o_vib:['الاهتزاز','Vibration'],d_vib:['اهتزاز الهاتف عند الإنذار','Vibrate the phone on alarm'],
+ o_notif:['إشعارات النظام','System notifications'],d_notif:['إشعار عند أي تنبيه جديد (يتطلب السماح)','Notify on a new alarm (needs permission)'],
+ o_wake:['إبقاء الشاشة مضاءة','Keep screen awake'],d_wake:['يمنع انطفاء الشاشة أثناء المراقبة','Stops the screen from sleeping while monitoring'],b_testsnd:['اختبار الصوت','Test sound'],
+ sec_conn:['الاتصال','Connection'],o_start:['عند فتح التطبيق','On app start'],d_start:['الاتصال الأولي','Initial connection'],st_demo:['محاكاة','Demo'],st_none:['بدون','None'],st_last:['آخر اتصال','Last'],
+ o_recon:['إعادة الاتصال تلقائياً','Auto reconnect'],d_recon:['يعيد محاولة WebSocket كل 3 ثوانٍ عند الانقطاع','Retries WebSocket every 3 s when dropped'],
+ o_poll:['فاصل قراءة HTTP (مللي ثانية)','HTTP poll interval (ms)'],d_poll:['كل كم يُطلب /status','How often /status is requested'],
+ sec_demo:['وضع المحاكاة','Simulation mode'],o_dbreak:['انقطاع عشوائي للخيط','Random yarn breaks'],d_dbreak:['تُحدث المحاكاة انقطاعات عشوائية للاختبار','Simulation produces random breaks'],
+ o_drpm:['سرعة المحاكاة (RPM)','Simulated speed (RPM)'],d_drpm:['السرعة الاسمية في المحاكاة','Nominal speed in the simulation'],
+ sec_data:['البيانات والسجلات','Data & logs'],o_pts:['نقاط الرسم البياني','Chart points'],d_pts:['عدد القراءات المعروضة في كل رسم','Readings shown per chart'],
+ o_logev:['فاصل تسجيل القراءة (ثانية)','Log interval (s)'],d_logev:['كل كم ثانية تُحفظ قراءة في السجل','Seconds between saved log entries'],o_logmax:['أقصى عدد سجلات','Max log entries'],d_logmax:['الأقدم يُحذف تلقائياً','Oldest are removed automatically'],
+ b_csv:['تصدير القراءات CSV','Export readings CSV'],b_csva:['تصدير التنبيهات CSV','Export alerts CSV'],b_pdf:['تصدير تقرير PDF','Export PDF report'],b_clear:['مسح السجلات','Clear logs'],b_reset:['استعادة كل الإعدادات','Reset all settings'],
+ sec_about:['حول التطبيق','About'],ver:['الإصدار','Version'],mach:['الماكينة','Machine'],dev:['المطوّر','Developer'],
+ /* toasts / misc */
+ t_connected:['تم الاتصال','Connected'],t_fail:['فشل الاتصال (تأكد من IP والشبكة)','Connection failed (check IP & network)'],t_badip:['عنوان غير صالح','Invalid address'],t_ip:['أدخل عنوان IP','Enter an IP address'],
+ t_demo:['وضع المحاكاة يعمل','Simulation running'],t_ble_unsup:['المتصفح لا يدعم Web Bluetooth (استخدم Chrome على أندرويد)','Web Bluetooth unsupported (use Chrome on Android)'],t_ble_fail:['فشل أو إلغاء اتصال Bluetooth','Bluetooth connection failed or cancelled'],t_ble_ok:['تم الاتصال عبر Bluetooth','Connected via Bluetooth'],
+ t_cfg_sent:['تم إرسال الإعدادات إلى المتحكم','Settings sent to controller'],t_defaults:['تمت استعادة القيم الافتراضية','Defaults restored'],t_saved:['تم الحفظ والإرسال للمتحكم','Saved and sent to controller'],
+ t_bad_range:['قيمة غير صالحة: الأدنى يجب أن يكون أقل من الأقصى','Invalid: minimum must be below maximum'],t_no_alarm:['لا توجد تنبيهات نشطة','No active alarms'],t_demo_only:['الاختبار متاح في وضع المحاكاة فقط','Tests work in simulation mode only'],
+ t_pdf:['جاري إنشاء PDF...','Creating PDF...'],t_pdf_ok:['تم حفظ التقرير','Report saved'],t_none:['لا توجد بيانات للتصدير','No data to export'],t_cleared:['تم مسح السجلات','Logs cleared'],t_reset:['تمت استعادة كل الإعدادات','All settings restored'],
+ t_denied:['لم يتم السماح بالإشعارات','Notifications were not allowed'],t_lcd:['تم إرسال الرسالة إلى الشاشة','Message sent to the LCD'],t_on:['تم التفعيل','Enabled'],t_off:['تم التعطيل','Disabled'],t_sendfail:['تعذر الإرسال','Send failed'],t_confirm:['اضغط مرة أخرى للتأكيد','Tap again to confirm']
+};
+const L=(ar,en)=>P.lang==='ar'?ar:P.lang==='en'?en:ar+' · '+en;
+const T=k=>{const d=DICT[k];return d?L(d[0],d[1]):k};
+const H=k=>{const d=DICT[k];if(!d)return k;return P.lang==='ar'?d[0]:P.lang==='en'?d[1]:`<span>${d[0]}</span><span class="sub">${d[1]}</span>`};
+const LA=a=>L(a[0],a[1]);
+const N=s=>'\u2066'+s+'\u2069';   // keep numbers+units in one LTR run inside RTL text
+const LOC=()=>P.lang==='en'?'en-GB':'ar-EG';
+const fmt=ts=>new Date(ts).toLocaleString(LOC());
+const fmtTime=ts=>new Date(ts).toLocaleTimeString(LOC(),{hour12:false});
+function applyLang(){
+  document.documentElement.lang=P.lang==='en'?'en':'ar';document.documentElement.dir=P.lang==='en'?'ltr':'rtl';
+  $$('[data-i18n]').forEach(e=>{e.innerHTML=H(e.dataset.i18n)});
+  $$('[data-i18n-ph]').forEach(e=>{e.placeholder=T(e.dataset.i18nPh)});
+  $('#brand').textContent=$('#brand2').textContent=P.name.trim()||'Control';
+}
+
+/* ---------- units ---------- */
+const TU=()=>P.tunit==='F'?'°F':'°C';
+const cvT=c=>P.tunit==='F'?c*9/5+32:c;
+const fromT=v=>P.tunit==='F'?(v-32)*5/9:v;
+const r1=x=>Math.round(x*10)/10;
+const fmtT=c=>cvT(c).toFixed(1);
+
+/* ---------- colors / theme ---------- */
+const ACC={ocean:['#38bdf8','#a78bfa'],emerald:['#22d3a0','#38bdf8'],sunset:['#fb923c','#f43f5e'],rose:['#f472b6','#a78bfa'],gold:['#fbbf24','#f97316'],violet:['#8b5cf6','#38bdf8'],mono:['#94a3b8','#e2e8f0']};
+const hex2rgb=h=>{h=h.replace('#','');if(h.length===3)h=h.split('').map(c=>c+c).join('');const n=parseInt(h,16);return[n>>16&255,n>>8&255,n&255]};
+const rgb2hex=(r,g,b)=>'#'+[r,g,b].map(x=>Math.max(0,Math.min(255,Math.round(x))).toString(16).padStart(2,'0')).join('');
+function shiftHue(h,deg){const[r,g,b]=hex2rgb(h).map(x=>x/255),mx=Math.max(r,g,b),mn=Math.min(r,g,b),d=mx-mn,l=(mx+mn)/2;if(!d)return h;
+  const s=l>.5?d/(2-mx-mn):d/(mx+mn);let hh=mx===r?(g-b)/d+(g<b?6:0):mx===g?(b-r)/d+2:(r-g)/d+4;hh=(hh*60+deg)%360;
+  const a=s*Math.min(l,1-l),f=n=>{const k=(n+hh/30)%12;return l-a*Math.max(-1,Math.min(k-3,9-k,1))};return rgb2hex(f(0)*255,f(8)*255,f(4)*255)}
+const onColor=h=>{const[r,g,b]=hex2rgb(h);return(.299*r+.587*g+.114*b)>150?'#04101f':'#ffffff'};
+const CV={};
+function readCV(){const cs=getComputedStyle(document.documentElement);['--acc','--acc2','--mut','--tx','--track','--bd','--ok','--warn','--bad','--bg'].forEach(k=>CV[k]=cs.getPropertyValue(k).trim())}
+function applyTheme(){
+  let th=P.theme;if(th==='auto')th=matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';
+  const de=document.documentElement;de.dataset.theme=th;
+  const a=P.accent==='custom'?[P.accentCustom,shiftHue(P.accentCustom,40)]:(ACC[P.accent]||ACC.ocean);
+  de.style.setProperty('--acc',a[0]);de.style.setProperty('--acc2',a[1]);de.style.setProperty('--on',onColor(a[0]));
+  readCV();$('#metaTheme').content=CV['--bg'];themeCharts();if(S)drawGauge(S.rpm)}
+matchMedia('(prefers-color-scheme: light)').addEventListener&&matchMedia('(prefers-color-scheme: light)').addEventListener('change',()=>{if(P.theme==='auto')applyTheme()});
+
+/* ---------- toast / audio ---------- */
+function toast(t){const e=$('#toast');e.textContent=t;e.style.display='block';clearTimeout(toast.t);toast.t=setTimeout(()=>e.style.display='none',2600)}
+let audioCtx=null;
+function beep(){try{audioCtx=audioCtx||new(window.AudioContext||window.webkitAudioContext)();if(audioCtx.state==='suspended')audioCtx.resume();
+  const vol=P.vol/100*.5;if(vol>0)[0,.25,.5].forEach(d=>{const o=audioCtx.createOscillator(),g=audioCtx.createGain();o.type='square';o.frequency.value=880;g.gain.value=vol;o.connect(g);g.connect(audioCtx.destination);o.start(audioCtx.currentTime+d);o.stop(audioCtx.currentTime+d+.15)});
+  if(P.vibrate&&navigator.vibrate)navigator.vibrate([200,100,200])}catch(e){}}
+addEventListener('pointerdown',()=>{try{audioCtx=audioCtx||new(window.AudioContext||window.webkitAudioContext)();audioCtx.resume()}catch(e){}});
+
+/* ---------- state ---------- */
+const S={power:true,yarn:1,yarnCount:0,yarnLog:[],rpm:0,pull:0,temp:28,hum:50,fan:false,fanMode:'auto',fanOk:1,thr:35,vin:11.8,vout:5.0,opto:1,mode:'none',lcd:['CONTROL  GHONIM','READY'],alerts:[],log:[]};
+let ws=null,httpTimer=null,bleChar=null,bleQ=Promise.resolve(),simTimer=null,lastLogT=0,want=null,charts=null;
+const MAXPTS=()=>P.points;
+
+/* ---------- navigation (with back-button support) ---------- */
+function go(v,push=true){if(!$('#v-'+v))v='home';
+  $$('.view').forEach(e=>e.classList.remove('show'));$('#v-'+v).classList.add('show');
+  $$('.tabbar a').forEach(a=>a.classList.toggle('a',a.dataset.go===v));$('#drawer').classList.remove('open');scrollTo({top:0});
+  if(push){try{history.pushState({v},'','#'+v)}catch(e){}}
+  setTimeout(()=>charts&&Object.values(charts).forEach(c=>c.resize()),60)}
+document.addEventListener('click',e=>{const g=e.target.closest('[data-go]');if(g)go(g.dataset.go)});
+addEventListener('popstate',e=>go((e.state&&e.state.v)||location.hash.slice(1)||'home',false));
+$('#menuBtn').onclick=()=>$('#drawer').classList.add('open');$('#drawerBg').onclick=()=>$('#drawer').classList.remove('open');
+
+/* ---------- charts ---------- */
+function chartLabels(){return{speed:['RPM'],dht:[TU(),L('% رطوبة','% RH')],volt:[L('V خرج 5V','5V out (V)')]}}
+function mkChart(id,key,colors,opts={}){const N=MAXPTS(),lb=chartLabels()[key];
+  return new Chart($(id),{type:'line',data:{labels:Array(N).fill(''),datasets:colors.map((c,i)=>({data:Array(N).fill(null),borderColor:c,backgroundColor:c+'22',fill:key==='speed',tension:.35,pointRadius:0,borderWidth:2,label:lb[i],yAxisID:i===1?'y1':'y'}))},
+  options:{responsive:true,maintainAspectRatio:false,animation:false,plugins:{legend:{labels:{color:CV['--mut']}}},scales:{x:{display:false},y:{ticks:{color:CV['--mut']},grid:{color:CV['--bd']},...(opts.y||{})},...(colors.length>1?{y1:{position:'right',ticks:{color:CV['--mut']},grid:{display:false}}}:{})}}})}
+function buildCharts(){charts={speed:mkChart('#cSpeed','speed',[CV['--acc']]),dht:mkChart('#cDht','dht',['#fb923c','#22d3ee']),volt:mkChart('#cVolt','volt',['#22d3a0'],{y:{min:4.5,max:5.5}})}}
+function themeCharts(){if(!charts)return;Object.values(charts).forEach(c=>{c.options.plugins.legend.labels.color=CV['--mut'];Object.values(c.options.scales).forEach(s=>{if(s.ticks)s.ticks.color=CV['--mut'];if(s.grid&&s.grid.display!==false)s.grid.color=CV['--bd']})});
+  charts.speed.data.datasets[0].borderColor=CV['--acc'];charts.speed.data.datasets[0].backgroundColor=CV['--acc']+'22';Object.values(charts).forEach(c=>c.update('none'))}
+function labelCharts(){if(!charts)return;const lb=chartLabels();Object.keys(charts).forEach(k=>charts[k].data.datasets.forEach((d,i)=>d.label=lb[k][i]));Object.values(charts).forEach(c=>c.update('none'))}
+function fit(a,n,fill){return a.length>=n?a.slice(a.length-n):Array(n-a.length).fill(fill).concat(a)}
+function resizeCharts(){const N=MAXPTS();Object.values(charts).forEach(c=>{c.data.labels=fit(c.data.labels,N,'');c.data.datasets.forEach(d=>d.data=fit(d.data,N,null));c.update('none')})}
+function clearChart(c){const N=MAXPTS();c.data.labels=Array(N).fill('');c.data.datasets.forEach(d=>d.data=Array(N).fill(null));c.update('none')}
+function push(ch,vals){ch.data.datasets.forEach((d,i)=>{d.data.push(vals[i]);d.data.shift()});ch.data.labels.push(fmtTime(Date.now()));ch.data.labels.shift();ch.update('none')}
+
+/* ---------- gauge ---------- */
+function drawGauge(v){const c=$('#gauge'),x=c.getContext('2d'),w=c.width,h=c.height,max=P.gaugeMax;x.clearRect(0,0,w,h);
+  const cx=w/2,cy=h-20,r=110,a0=Math.PI,p=Math.max(0,Math.min(v/max,1));
+  x.lineWidth=18;x.lineCap='round';x.strokeStyle=CV['--track'];x.beginPath();x.arc(cx,cy,r,a0,2*Math.PI);x.stroke();
+  const g=x.createLinearGradient(0,0,w,0);g.addColorStop(0,CV['--ok']);g.addColorStop(.6,CV['--warn']);g.addColorStop(1,CV['--bad']);
+  x.strokeStyle=g;x.beginPath();x.arc(cx,cy,r,a0,a0+Math.PI*p);x.stroke();
+  const a=a0+Math.PI*p;x.strokeStyle=CV['--tx'];x.lineWidth=4;x.beginPath();x.moveTo(cx,cy);x.lineTo(cx+Math.cos(a)*(r-26),cy+Math.sin(a)*(r-26));x.stroke();
+  x.fillStyle=CV['--tx'];x.font='bold 22px Cairo';x.textAlign='center';x.fillText(Math.round(v),cx,cy-30);x.fillStyle=CV['--mut'];x.font='12px Cairo';x.fillText('RPM  (max '+max+')',cx,cy-12)}
+
+/* ---------- ingest data (real or simulated) ---------- */
+function apply(d){
+  if('power'in d)S.power=!!d.power;
+  if('yarn'in d){const prev=S.yarn;S.yarn=d.yarn?1:0;if(prev&&!S.yarn){S.yarnCount=d.yarnCount??S.yarnCount+1;S.yarnLog.unshift({n:S.yarnCount,ts:Date.now(),rpm:Math.round(S.rpm)});S.yarnLog=S.yarnLog.slice(0,200)}}
+  if('yarnCount'in d&&d.yarn!==0)S.yarnCount=d.yarnCount;
+  ['rpm','temp','hum','vin','vout'].forEach(k=>{if(k in d)S[k]=+d[k]});
+  if('fan'in d)S.fan=!!d.fan;if('fanMode'in d)S.fanMode=d.fanMode;if('opto'in d)S.opto=d.opto?1:0;
+  S.pull=S.rpm*Math.PI*(P.roller/1000);if('fanOk'in d)S.fanOk=d.fanOk?1:0;
+  render();updateAlarms();const t=Date.now();
+  push(charts.speed,[S.rpm]);push(charts.dht,[r1(cvT(S.temp)),S.hum]);push(charts.volt,[S.vout]);
+  if(t-lastLogT>P.logEvery*1000){lastLogT=t;S.log.unshift({ts:t,rpm:Math.round(S.rpm),temp:r1(S.temp),hum:Math.round(S.hum),vout:+S.vout.toFixed(2),yarn:S.yarn});S.log=S.log.slice(0,P.logMax)}
+}
+
+/* ---------- render ---------- */
+function setB(el,ok,txt,warn){el.className='badge '+(ok?'b-ok':warn?'b-warn':'b-bad');el.textContent=txt}
+function render(){
+  $$('.tu').forEach(e=>e.textContent=TU());
+  $('#masterSw').classList.toggle('on',S.power);$('#pwTxt').textContent=T(S.power?'running':'stopped');setB($('#pwBadge'),S.power,T('confirmed')+': '+(S.power?'ON':'OFF'));
+  $('#hYarn').textContent=T(S.yarn?'ok':'broken');setB($('#hYarnB'),S.yarn,S.yarn?'OK':'BREAK');$('#hYarnC').textContent=S.yarnCount;
+  $('#yState').textContent=T(S.yarn?'ok':'broken');$('#yState').style.color=S.yarn?'':'var(--bad)';setB($('#yBadge'),S.yarn,T(S.yarn?'y_flow':'y_cut'));$('#yCount').textContent=S.yarnCount;
+  $('#yLog').innerHTML=S.yarnLog.map(l=>`<tr><td>${l.n}</td><td>${fmt(l.ts)}</td><td>${l.rpm}</td></tr>`).join('')||`<tr><td colspan=3>${T('none_breaks')}</td></tr>`;
+  const rp=Math.round(S.rpm),pl=S.pull.toFixed(1);['hRpm','sRpm'].forEach(i=>$('#'+i).textContent=rp);['hPull','sPull'].forEach(i=>$('#'+i).textContent=pl);$('#rollerNote').textContent=P.roller;drawGauge(S.rpm);
+  const Tt=fmtT(S.temp),Hh=Math.round(S.hum);['hTemp','dTemp'].forEach(i=>$('#'+i).textContent=Tt);['hHum','dHum'].forEach(i=>$('#'+i).textContent=Hh);
+  const hot=S.temp>=S.thr;setB($('#dBadge'),!hot,T(hot?'high':'normal'));
+  $('#fanSw').classList.toggle('on',S.fan);$('#fanIcon').classList.toggle('spin',S.fan);$('#fanTxt').textContent=T(S.fan?'fan_on':'fan_off');$('#fanTemp').textContent=T('temp_now')+' '+N(Tt+TU());
+  $('#dFan').textContent=T(S.fan?'fan_on':'fan_off');$('#dThr').textContent=fmtT(S.thr);if(document.activeElement!==$('#thr'))$('#thr').value=r1(cvT(S.thr));
+  $$('#fanSeg button').forEach(b=>b.classList.toggle('a',b.dataset.m===S.fanMode));
+  $('#hVout').textContent=S.vout.toFixed(2);$('#pVout').textContent=S.vout.toFixed(2);$('#pVin').textContent=S.vin.toFixed(1);
+  const dev=Math.abs(S.vout-5),st=dev<.1;setB($('#pStab'),st,st?T('stable'):T('deviation')+' '+dev.toFixed(2)+'V',dev<.25);$('#pBar').style.width=Math.max(0,100-dev*200)+'%';$('#pBar').style.background=st?'var(--ok)':'var(--warn)';
+  setB($('#hOpto'),S.opto,T(S.opto?'iso_ok':'iso_bad'));$('#pOpto').textContent=T(S.opto?'opto_ok':'opto_bad');
+  $('#pOptoLed').style.background=S.opto?'var(--ok)':'var(--bad)';$('#pOptoLed').style.boxShadow='0 0 14px '+(S.opto?'var(--ok)':'var(--bad)');
+  $('#lcd1').textContent=S.lcd[0].padEnd(16).slice(0,16);$('#lcd2').textContent=S.lcd[1].padEnd(16).slice(0,16);
+}
+
+/* ---------- commands (to ESP32) ---------- */
+function send(obj){const s=JSON.stringify(obj);
+  if(S.mode==='ws'&&ws&&ws.readyState===1)ws.send(s);
+  else if(S.mode==='http'&&want)fetch(httpBase(want.ip)+'/cmd',{method:'POST',headers:{'Content-Type':'application/json'},body:s}).catch(()=>toast(T('t_sendfail')));
+  else if(S.mode==='ble'&&bleChar){const b=new TextEncoder().encode(s+'\n');bleQ=bleQ.then(async()=>{for(let i=0;i<b.length;i+=20)await bleChar.writeValue(b.slice(i,i+20))}).catch(()=>toast(T('t_sendfail')))}}
+const sendFan=()=>send({cmd:'fan',mode:S.fanMode,value:S.fan?1:0,threshold:S.thr,hyst:P.hyst});
+$('#masterSw').onclick=()=>{S.power=!S.power;send({cmd:'power',value:S.power?1:0});render();updateAlarms();toast(T(S.power?'t_on':'t_off'))};
+$('#lcdIn').oninput=e=>{$('#lcdCnt').textContent=e.target.value.length+'/32'};
+$('#lcdSend').onclick=()=>{let t=$('#lcdIn').value;if(P.lcdAscii)t=t.replace(/[^\x20-\x7E]/g,'');t=t.slice(0,32);S.lcd=[t.slice(0,16),t.slice(16,32)];send({cmd:'lcd',line1:S.lcd[0],line2:S.lcd[1]});render();toast(T('t_lcd'))};
+$('#fanSw').onclick=()=>{S.fanMode='manual';S.fan=!S.fan;sendFan();render()};
+$$('#fanSeg button').forEach(b=>b.onclick=()=>{S.fanMode=b.dataset.m;sendFan();render()});
+$('#thr').onchange=e=>{const v=parseFloat(e.target.value);if(!isNaN(v)){S.thr=fromT(v);sendFan()}render()};
+$('#yReset').onclick=()=>{S.yarnCount=0;S.yarnLog=[];render()};
+
+/* ---------- connectivity ---------- */
+const httpBase=ip=>ip.replace(/^(?!https?:\/\/)/,'http://');
+function setConn(m){S.mode=m;$('#connDot').className='dot '+(m==='demo'?'demo':m==='none'?'':'on');
+  $('#connTxt').textContent=T('s_'+m);clearInterval(simTimer);if(m==='demo')simTimer=setInterval(simTick,1000);
+  if(m==='ws'||m==='http'||m==='ble')setTimeout(()=>{sendCfg();sendFan()},600)}
+function disconnect(){want=null;if(ws){const w=ws;ws=null;w.onclose=null;try{w.close()}catch(e){}}clearInterval(httpTimer);try{bleChar&&bleChar.service.device.gatt.disconnect()}catch(e){}bleChar=null;setConn('none')}
+const ipv=()=>$('#ipIn').value.trim();
+function connWs(ip,silent){
+  let w;try{w=new WebSocket('ws://'+ip+':81/')}catch(e){return toast(T('t_badip'))}ws=w;
+  w.onopen=()=>{setConn('ws');setP('lastMode','ws');setP('lastIp',ip);if(!silent)toast(T('t_connected'));$('#connModal').classList.remove('open')};
+  w.onmessage=e=>{try{apply(JSON.parse(e.data))}catch(x){}};
+  w.onclose=()=>{if(ws!==w)return;ws=null;setConn('none');if(want&&want.mode==='ws'&&P.reconnect){$('#connTxt').textContent=T('s_retry');setTimeout(()=>{if(want&&want.mode==='ws'&&!ws)connWs(ip,true)},3000)}};
+  w.onerror=()=>{if(!silent)toast(T('t_fail'))}}
+function startHttp(ip){setConn('http');clearInterval(httpTimer);const poll=()=>fetch(httpBase(ip)+'/status').then(r=>r.json()).then(d=>{if(S.mode==='http')apply(d)}).catch(()=>{if(S.mode==='http')$('#connTxt').textContent=T('s_noresp')});poll();httpTimer=setInterval(poll,P.pollMs)}
+$('#cWs').onclick=()=>{if(!ipv())return toast(T('t_ip'));disconnect();want={mode:'ws',ip:ipv()};connWs(ipv())};
+$('#cHttp').onclick=()=>{if(!ipv())return toast(T('t_ip'));disconnect();want={mode:'http',ip:ipv()};setP('lastMode','http');setP('lastIp',ipv());startHttp(ipv());$('#connModal').classList.remove('open')};
+$('#cBle').onclick=async()=>{if(!navigator.bluetooth)return toast(T('t_ble_unsup'));
+  try{const dev=await navigator.bluetooth.requestDevice({filters:[{services:['6e400001-b5a3-f393-e0a9-e50e24dcca9e']}]});disconnect();
+    const srv=await dev.gatt.connect(),svc=await srv.getPrimaryService('6e400001-b5a3-f393-e0a9-e50e24dcca9e');
+    bleChar=await svc.getCharacteristic('6e400002-b5a3-f393-e0a9-e50e24dcca9e');const tx=await svc.getCharacteristic('6e400003-b5a3-f393-e0a9-e50e24dcca9e');
+    let buf='';await tx.startNotifications();tx.addEventListener('characteristicvaluechanged',e=>{buf+=new TextDecoder().decode(e.target.value);let i;while((i=buf.indexOf('\n'))>=0){try{apply(JSON.parse(buf.slice(0,i)))}catch(x){}buf=buf.slice(i+1)}});
+    dev.addEventListener('gattserverdisconnected',()=>{if(S.mode==='ble')setConn('none')});setConn('ble');$('#connModal').classList.remove('open');toast(T('t_ble_ok'))}catch(e){toast(T('t_ble_fail'))}};
+$('#cDemo').onclick=()=>{disconnect();setConn('demo');$('#connModal').classList.remove('open');toast(T('t_demo'))};
+$('#cOff').onclick=()=>{disconnect();$('#connModal').classList.remove('open')};
+$('#cClose').onclick=()=>$('#connModal').classList.remove('open');
+$('#connPill').onclick=$('#navConn').onclick=()=>{$('#drawer').classList.remove('open');$('#connModal').classList.add('open')};
+
+/* ---------- simulation (demo mode) ---------- */
+const SIM={heat:false,fanFault:false,slow:false};
+let breakUntil=0,tt=0;
+function simTick(){tt++;const t=Date.now();let rpm=S.rpm,nom=P.demoRpm;
+  const target=S.power&&S.yarn?(SIM.slow?nom*.35:nom)+Math.sin(tt/8)*nom*.12+(Math.random()-.5)*40:0;rpm+=(target-rpm)*.35;
+  let yarn=S.yarn;
+  if(S.power&&yarn&&P.demoBreaks&&Math.random()<.004){yarn=0;breakUntil=t+6000}
+  if(!yarn&&t>breakUntil)yarn=1;
+  let fan=S.fan;const base=27+(rpm/1200)*15-(fan&&!SIM.fanFault?9:0)+(SIM.heat?12:0);let temp=S.temp+(base-S.temp)*.08+(Math.random()-.5)*.2;
+  if(S.fanMode==='auto')fan=S.fan?temp>S.thr-P.hyst:temp>=S.thr;
+  const hum=Math.max(20,Math.min(85,S.hum+(70-temp*1.2-S.hum)*.1+(Math.random()-.5)));
+  apply({yarn,rpm:Math.max(0,rpm),temp,hum,fan,vin:11.8+(Math.random()-.5)*.3,vout:5.0+(Math.random()-.5)*.06,opto:1,power:S.power})}
+
+/* ============================================================================
+   Smart Alert System — نظام التنبيهات الذكي + الصافرة (Active Buzzer)
+   تم التصميم والبرمجة بواسطة المهندس / محمد غنيم — Mohamed Ghonim
+   ============================================================================ */
+const CFG_DEF={buzzer:true,rpm:{en:true,snd:true,min:800,max:1800},temp:{en:true,snd:true,min:10,max:45},hum:{en:true,snd:true,min:20,max:80},yarn:{en:true,snd:true},fan:{en:true,snd:true},power:{en:true,snd:true}};
+let CFG=JSON.parse(JSON.stringify(CFG_DEF));
+(function(){const s=LS.get('kreativ_cfg',null)||LS.get('rojdart_cfg',null);if(s){CFG.buzzer=s.buzzer!==false;['rpm','temp','hum','yarn','fan','power'].forEach(k=>{if(s[k])CFG[k]={...CFG_DEF[k],...s[k]}})}})();
+const DEFS=[
+ {k:'rpm',ic:'⚡',t:'a_rpm',u:'RPM',range:1,step:50,val:()=>Math.round(S.rpm)},
+ {k:'temp',ic:'🌡️',t:'a_temp',range:1,step:1,val:()=>fmtT(S.temp)},
+ {k:'hum',ic:'💧',t:'a_hum',u:'%',range:1,step:1,val:()=>Math.round(S.hum)},
+ {k:'yarn',ic:'🧵',t:'a_yarn',desc:'ad_yarn',val:()=>T(S.yarn?'ok':'broken')},
+ {k:'fan',ic:'🌀',t:'a_fan',desc:'ad_fan',val:()=>T(S.fan?'fan_on':'fan_off')},
+ {k:'power',ic:'🔌',t:'a_power',desc:'ad_power',u:'V',val:()=>S.vout.toFixed(2)}];
+function sendCfg(){const c=CFG;send({cmd:'alerts',buzzer:+c.buzzer,rpmEn:+c.rpm.en,rpmMin:c.rpm.min,rpmMax:c.rpm.max,tempEn:+c.temp.en,tempMin:c.temp.min,tempMax:c.temp.max,humEn:+c.hum.en,humMin:c.hum.min,humMax:c.hum.max,yarnEn:+c.yarn.en,fanEn:+c.fan.en,powerEn:+c.power.en})}
+function saveCfg(){LS.set('kreativ_cfg',CFG);sendCfg();updateAlarms()}
+
+const AL={active:{},muted:false,armed:false,fanSince:0,needSince:0,hw:false,timer:null};
+function evalAlarms(){
+  const a={},c=CFG,T0=Date.now(),u=TU();
+  if(!S.power)AL.armed=false;else if(S.rpm>=c.rpm.min)AL.armed=true;   // low-RPM alarm arms once the machine has reached its minimum speed
+  if(c.rpm.en&&S.power){
+    if(S.rpm>c.rpm.max)a.rpm=['سرعة اللف مرتفعة: '+N(Math.round(S.rpm)+' RPM')+' (الحد الأقصى '+c.rpm.max+')','Winding speed too high: '+N(Math.round(S.rpm)+' RPM')+' (max '+c.rpm.max+')'];
+    else if(AL.armed&&S.rpm<c.rpm.min)a.rpm=['سرعة اللف منخفضة: '+N(Math.round(S.rpm)+' RPM')+' (الحد الأدنى '+c.rpm.min+')','Winding speed too low: '+N(Math.round(S.rpm)+' RPM')+' (min '+c.rpm.min+')'];}
+  if(c.temp.en){
+    if(S.temp>c.temp.max)a.temp=['ارتفاع الحرارة: '+N(fmtT(S.temp)+u)+' (الحد الأقصى '+fmtT(c.temp.max)+')','Temperature high: '+N(fmtT(S.temp)+u)+' (max '+fmtT(c.temp.max)+')'];
+    else if(S.temp<c.temp.min)a.temp=['انخفاض الحرارة: '+N(fmtT(S.temp)+u)+' (الحد الأدنى '+fmtT(c.temp.min)+')','Temperature low: '+N(fmtT(S.temp)+u)+' (min '+fmtT(c.temp.min)+')'];}
+  if(c.hum.en){
+    if(S.hum>c.hum.max)a.hum=['ارتفاع الرطوبة: '+N(Math.round(S.hum)+'%')+' (الحد الأقصى '+c.hum.max+')','Humidity high: '+N(Math.round(S.hum)+'%')+' (max '+c.hum.max+')'];
+    else if(S.hum<c.hum.min)a.hum=['انخفاض الرطوبة: '+N(Math.round(S.hum)+'%')+' (الحد الأدنى '+c.hum.min+')','Humidity low: '+N(Math.round(S.hum)+'%')+' (min '+c.hum.min+')'];}
+  if(c.yarn.en&&S.power&&!S.yarn)a.yarn=['تم قطع الخيط!','Yarn is broken!'];
+  if(S.fan){if(!AL.fanSince)AL.fanSince=T0}else AL.fanSince=0;
+  const need=S.fanMode==='auto'&&!S.fan&&S.temp>=S.thr+3;
+  if(need){if(!AL.needSince)AL.needSince=T0}else AL.needSince=0;
+  if(c.fan.en){
+    if(S.fanOk===0)a.fan=['عطل في مروحة التبريد (بلاغ من المتحكم)','Cooling fan fault (controller report)'];
+    else if(S.fan&&T0-AL.fanSince>30000&&S.temp>=S.thr+3)a.fan=['المروحة تعمل ولا تخفض الحرارة (عطل محتمل)','Fan runs but temperature is not dropping (possible fault)'];
+    else if(AL.needSince&&T0-AL.needSince>10000)a.fan=['مروحة التبريد متوقفة رغم ارتفاع الحرارة','Cooling fan is stopped while temperature is high'];}
+  if(c.power.en){
+    if(!S.opto)a.power=['فقدان العزل الضوئي PC817','PC817 isolation lost'];
+    else if(Math.abs(S.vout-5)>.25)a.power=['انحراف جهد 5V: '+S.vout.toFixed(2)+'V','5V rail deviation: '+S.vout.toFixed(2)+'V'];}
+  return a}
+function updateAlarms(){
+  const a=evalAlarms(),prev=AL.active,fresh=[];
+  for(const k in a)if(!(k in prev)){fresh.push(a[k]);S.alerts.unshift({ts:Date.now(),ar:a[k][0],en:a[k][1]})}
+  S.alerts=S.alerts.slice(0,200);AL.active=a;
+  if(fresh.length||!Object.keys(a).length)AL.muted=false;
+  if(fresh.length)notify(fresh);
+  buzzerSync();renderAlarms()}
+function notify(msgs){if(!P.notif||!('Notification'in window)||Notification.permission!=='granted')return;
+  const o={body:msgs.map(LA).join('\n'),icon:'icon-192.png',tag:'control-alarm',renotify:true,vibrate:[200,100,200]},ttl=T('al_c');
+  const fb=()=>{try{new Notification(ttl,o)}catch(e){}};
+  if(navigator.serviceWorker&&navigator.serviceWorker.getRegistration)navigator.serviceWorker.getRegistration().then(r=>r?r.showNotification(ttl,o):fb()).catch(fb);else fb()}
+function buzzerSync(){
+  const want=CFG.buzzer&&!AL.muted&&Object.keys(AL.active).some(k=>CFG[k].snd);
+  if(want!==AL.hw){AL.hw=want;send({cmd:'buzzer',value:want?1:0})}
+  if(want&&!AL.timer){beep();AL.timer=setInterval(beep,P.repeat*1000)}
+  if(!want&&AL.timer){clearInterval(AL.timer);AL.timer=null}}
+function renderAlarms(){
+  const ks=Object.keys(AL.active),n=ks.length;
+  document.documentElement.style.setProperty('--hh',document.querySelector('header').offsetHeight+'px');
+  $('#alarmBar').style.display=n?'flex':'none';
+  $('#alarmList').innerHTML=ks.map(x=>{const a=AL.active[x];return P.lang==='both'?`<div dir="rtl">🚨 ${esc(a[0])}</div><div dir="ltr">${esc(a[1])}</div>`:`<div>🚨 ${esc(LA(a))}</div>`}).join('');
+  const mb=$('#muteBtn');mb.style.display=CFG.buzzer?'':'none';mb.textContent=T(AL.muted?'a_unmute':'a_mute');
+  const tb=$('#tabBadge');tb.style.display=n?'block':'none';tb.textContent=n;
+  $('#hAlCnt').textContent=n;setB($('#hAlB'),!n,n?L('يوجد '+n+' تنبيه نشط',n+' active alarm(s)'):T('no_faults'));
+  DEFS.forEach(d=>{const on=CFG[d.k].en,al=d.k in AL.active,el=$('#lv-'+d.k);if(!el)return;
+    el.textContent=d.val();setB($('#st-'+d.k),on&&!al,T(!on?'a_off':al?'a_alarm':'a_ok'),!on);
+    $('#ac-'+d.k).classList.toggle('alarming',al);$('#sw-'+d.k).classList.toggle('on',on);$('#sn-'+d.k).classList.toggle('on',CFG[d.k].snd)});
+  $('#bzSw').classList.toggle('on',CFG.buzzer);
+  $('#bzState').textContent=T(!CFG.buzzer?'bz_off':n?(AL.muted?'bz_muted':'bz_on'):'bz_ready')}
+function buildAlertCards(){
+  $('#alCards').innerHTML=DEFS.map(d=>{const un=d.k==='temp'?TU():d.u||'';
+    return `<div class="card" id="ac-${d.k}"><h3><i>${d.ic}</i><span>${H(d.t)}</span></h3>
+    <div class="row"><div class="big" style="font-size:1.5rem"><span id="lv-${d.k}">--</span><span class="unit">${un}</span></div><span class="badge b-ok" id="st-${d.k}"></span></div>
+    <div class="opt" style="padding:8px 0"><span style="font-size:.85rem">${H('a_enable')}</span><div class="switch sm on" id="sw-${d.k}" data-sw="${d.k}"></div></div>
+    <div class="opt" style="padding:8px 0"><span style="font-size:.85rem">${H('a_sound')}</span><div class="switch sm on" id="sn-${d.k}" data-sn="${d.k}"></div></div>
+    ${d.range?`<div class="row" style="gap:8px;flex-wrap:nowrap;margin-top:6px"><label class="lbl">${H('a_min')}<input type="number" step="${d.step}" data-k="${d.k}" data-f="min" value="${d.k==='temp'?r1(cvT(CFG[d.k].min)):CFG[d.k].min}"></label><label class="lbl">${H('a_max')}<input type="number" step="${d.step}" data-k="${d.k}" data-f="max" value="${d.k==='temp'?r1(cvT(CFG[d.k].max)):CFG[d.k].max}"></label></div>`:`<small style="color:var(--mut)">${H(d.desc)}</small>`}</div>`}).join('')}
+document.addEventListener('click',e=>{
+  const s=e.target.closest('[data-sw]');if(s){const k=s.dataset.sw;CFG[k].en=!CFG[k].en;saveCfg();return}
+  const n=e.target.closest('[data-sn]');if(n){const k=n.dataset.sn;CFG[k].snd=!CFG[k].snd;saveCfg()}});
+document.addEventListener('change',e=>{const i=e.target.closest('input[data-k]');if(!i)return;
+  const k=i.dataset.k,f=i.dataset.f;let v=parseFloat(i.value);if(!isNaN(v)&&k==='temp')v=fromT(v);
+  const shown=x=>k==='temp'?r1(cvT(x)):x;
+  if(isNaN(v)||(f==='min'?v>=CFG[k].max:v<=CFG[k].min)){toast(T('t_bad_range'));i.value=shown(CFG[k][f]);return}
+  CFG[k][f]=k==='temp'?r1(v):v;saveCfg();toast(T('t_saved'))});
+$('#bzSw').onclick=()=>{CFG.buzzer=!CFG.buzzer;saveCfg()};
+$('#bzTest').onclick=()=>{beep();send({cmd:'buzzer',value:1});setTimeout(()=>{if(!AL.hw)send({cmd:'buzzer',value:0})},1500)};
+$('#muteBtn').onclick=$('#bzMute').onclick=()=>{if(!Object.keys(AL.active).length)return toast(T('t_no_alarm'));AL.muted=!AL.muted;buzzerSync();renderAlarms()};
+$('#alSend').onclick=()=>{sendCfg();toast(T('t_cfg_sent'))};
+$('#alReset').onclick=()=>{CFG=JSON.parse(JSON.stringify(CFG_DEF));buildAlertCards();saveCfg();toast(T('t_defaults'))};
+const TESTS=[['tHeat','heat','t_heat'],['tFan','fanFault','t_fan'],['tSlow','slow','t_slow']];
+function labelTests(){TESTS.forEach(([id,k,key])=>{const b=$('#'+id);b.textContent=(SIM[k]?T('t_stop'):'')+T(key);b.classList.toggle('red',SIM[k])});$('#tYarn').textContent=T('t_yarn')}
+TESTS.forEach(([id,k])=>{$('#'+id).onclick=()=>{if(S.mode!=='demo')return toast(T('t_demo_only'));SIM[k]=!SIM[k];labelTests()}});
+$('#tYarn').onclick=()=>{if(S.mode!=='demo')return toast(T('t_demo_only'));breakUntil=Date.now()+5000;apply({yarn:0})};
+
+/* ============================================================================
+   Settings (every option below drives real behaviour)
+   ============================================================================ */
+const CARDS=[['master','master_t'],['lcd','lcd_t'],['fan','fan_t'],['yarn','yarn_c'],['speed','speed_c'],['dht','dht_c'],['power','power_c'],['alerts','al_c']];
+const CHARTS=[['speed','chart_speed'],['dht','chart_dht'],['volt','chart_volt']];
+const SET=[
+ {id:'appearance',ic:'🎨',t:'sec_appearance',items:[
+  {k:'theme',type:'seg',lab:'o_theme',desc:'d_theme',opts:[['dark','th_dark'],['light','th_light'],['amoled','th_amoled'],['auto','th_auto']]},
+  {k:'accent',type:'accent',lab:'o_accent',desc:'d_accent'},
+  {k:'glass',type:'sw',lab:'o_glass',desc:'d_glass'},
+  {k:'fs',type:'range',min:85,max:125,step:5,unit:'%',lab:'o_fs',desc:'d_fs'},
+  {k:'radius',type:'range',min:8,max:28,step:2,unit:'px',lab:'o_radius',desc:'d_radius'},
+  {k:'density',type:'seg',lab:'o_density',desc:'d_density',opts:[['comfy','dn_comfy'],['compact','dn_compact']]},
+  {k:'anim',type:'sw',lab:'o_anim',desc:'d_anim'},
+  {k:'tabbar',type:'sw',lab:'o_tabbar',desc:'d_tabbar'}]},
+ {id:'language',ic:'🌐',t:'sec_language',items:[
+  {k:'lang',type:'seg',lab:'o_lang',desc:'d_lang',opts:[['ar','lg_ar'],['en','lg_en'],['both','lg_both']]},
+  {k:'name',type:'text',lab:'o_name',desc:'d_name',ph:'Control'}]},
+ {id:'display',ic:'🧩',t:'sec_display',items:[
+  ...CARDS.map(c=>({k:'cards.'+c[0],type:'sw',lab:c[1],desc:'d_card'})),
+  ...CHARTS.map(c=>({k:'charts.'+c[0],type:'sw',lab:c[1],desc:'d_chart'}))]},
+ {id:'units',ic:'📐',t:'sec_units',items:[
+  {k:'tunit',type:'seg',lab:'o_tunit',desc:'d_tunit',opts:[['C','°C'],['F','°F']],raw:true},
+  {k:'roller',type:'num',min:10,max:200,step:1,lab:'o_roller',desc:'d_roller'},
+  {k:'gaugeMax',type:'num',min:500,max:10000,step:100,lab:'o_gmax',desc:'d_gmax'},
+  {k:'hyst',type:'num',min:0,max:10,step:.5,lab:'o_hyst',desc:'d_hyst'},
+  {k:'lcdAscii',type:'sw',lab:'o_ascii',desc:'d_ascii'}]},
+ {id:'sound',ic:'🔊',t:'sec_sound',items:[
+  {k:'vol',type:'range',min:0,max:100,step:5,unit:'%',lab:'o_vol',desc:'d_vol'},
+  {k:'repeat',type:'range',min:1,max:10,step:1,unit:'s',lab:'o_rep',desc:'d_rep'},
+  {k:'vibrate',type:'sw',lab:'o_vib',desc:'d_vib'},
+  {k:'notif',type:'sw',lab:'o_notif',desc:'d_notif'},
+  {k:'wake',type:'sw',lab:'o_wake',desc:'d_wake'},
+  {type:'btn',act:'testsnd',lab:'b_testsnd'}]},
+ {id:'connection',ic:'📡',t:'sec_conn',items:[
+  {k:'startMode',type:'seg',lab:'o_start',desc:'d_start',opts:[['demo','st_demo'],['none','st_none'],['last','st_last']]},
+  {k:'reconnect',type:'sw',lab:'o_recon',desc:'d_recon'},
+  {k:'pollMs',type:'num',min:250,max:10000,step:250,lab:'o_poll',desc:'d_poll'}]},
+ {id:'demo',ic:'🧪',t:'sec_demo',items:[
+  {k:'demoBreaks',type:'sw',lab:'o_dbreak',desc:'d_dbreak'},
+  {k:'demoRpm',type:'range',min:400,max:2500,step:50,unit:'',lab:'o_drpm',desc:'d_drpm'}]},
+ {id:'data',ic:'🗂️',t:'sec_data',items:[
+  {k:'points',type:'seg',lab:'o_pts',desc:'d_pts',opts:[['30','30'],['60','60'],['120','120']],raw:true},
+  {k:'logEvery',type:'num',min:1,max:60,step:1,lab:'o_logev',desc:'d_logev'},
+  {k:'logMax',type:'num',min:50,max:2000,step:50,lab:'o_logmax',desc:'d_logmax'},
+  {type:'btn',act:'csv',lab:'b_csv'},{type:'btn',act:'csva',lab:'b_csva'},{type:'btn',act:'pdf',lab:'b_pdf'},{type:'btn',act:'clear',lab:'b_clear'},{type:'btn',act:'reset',lab:'b_reset',danger:1}]},
+ {id:'about',ic:'ℹ️',t:'sec_about',about:1}];
+function ctl(it){const v=it.k?getP(it.k):null;
+  switch(it.type){
+  case'sw':return `<div class="switch sm${v?' on':''}" data-s="${it.k}"></div>`;
+  case'seg':return `<div class="seg" data-seg="${it.k}">${it.opts.map(o=>`<button data-v="${o[0]}" class="${String(v)===o[0]?'a':''}">${it.raw?o[1]:H(o[1])}</button>`).join('')}</div>`;
+  case'range':return `<div class="rg"><input type="range" min="${it.min}" max="${it.max}" step="${it.step}" data-r="${it.k}" value="${v}"><b class="rv" id="rv-${it.k.replace('.','_')}">${v}${it.unit||''}</b></div>`;
+  case'num':return `<input class="num" type="number" min="${it.min}" max="${it.max}" step="${it.step}" data-n="${it.k}" value="${v}">`;
+  case'text':return `<input class="txt" type="text" maxlength="20" data-t="${it.k}" value="${esc(v)}" placeholder="${esc(it.ph||'')}">`;
+  case'accent':return `<div class="sws">${Object.keys(ACC).map(k=>`<button class="swc${P.accent===k?' a':''}" data-acc="${k}" style="background:linear-gradient(135deg,${ACC[k][0]},${ACC[k][1]})" aria-label="${k}"></button>`).join('')}<label title="${T('ac_custom')}" class="swc${P.accent==='custom'?' a':''}" style="background:conic-gradient(red,yellow,lime,cyan,blue,magenta,red);display:block;overflow:hidden"><input type="color" data-accc value="${P.accentCustom}" style="opacity:0;width:100%;height:100%"></label></div>`;
+  case'btn':return `<button class="btn ${it.danger?'red':'ghost'}" data-act="${it.act}">${H(it.lab)}</button>`}return''}
+function buildSettings(){
+  $('#setChips').innerHTML=SET.map(s=>`<button class="chip2" data-jump="sec-${s.id}">${s.ic} ${T(s.t)}</button>`).join('');
+  $('#setBody').innerHTML=SET.map(s=>{
+    if(s.about)return `<div class="card setsec" id="sec-${s.id}"><h3><i>${s.ic}</i><span>${H(s.t)}</span></h3>
+      <div class="opt"><span>${H('ver')}</span><b>3.0</b></div><div class="opt"><span>${H('mach')}</span><b dir="ltr">ROJ DART 90W · STIRO G2D / Stela G2D</b></div>
+      <div class="opt"><span>${H('dev')}</span><b style="text-align:end;font-size:.8rem">المهندس / محمد غنيم<br><span dir="ltr">Mohamed Ghonim</span></b></div></div>`;
+    return `<div class="card setsec" id="sec-${s.id}"><h3><i>${s.ic}</i><span>${H(s.t)}</span></h3>${s.items.map(it=>it.type==='btn'?`<div class="opt" style="justify-content:flex-start">${ctl(it)}</div>`:`<div class="opt"><div class="tx"><b>${H(it.lab)}</b><small>${H(it.desc)}</small></div>${ctl(it)}</div>`).join('')}</div>`}).join('')}
+
+function setPref(k,v){setP(k,v);applyPref(k)}
+function applyPref(k){
+  const root=document.documentElement,b=document.body;
+  if(k==='theme'||k==='accent'||k==='accentCustom')applyTheme();
+  else if(k==='glass')b.classList.toggle('solid',!P.glass);
+  else if(k==='fs')root.style.fontSize=(16*P.fs/100)+'px';
+  else if(k==='radius')root.style.setProperty('--r',P.radius+'px');
+  else if(k==='density')b.classList.toggle('compact',P.density==='compact');
+  else if(k==='anim')b.classList.toggle('noanim',!P.anim);
+  else if(k==='tabbar')b.classList.toggle('notab',!P.tabbar);
+  else if(k==='lang'){applyLang();buildSettings();buildAlertCards();labelTests();labelCharts();render();updateAlarms();$('#connTxt').textContent=T('s_'+S.mode)}
+  else if(k==='name')applyLang();
+  else if(k.startsWith('cards.'))applyVisibility();
+  else if(k.startsWith('charts.'))applyVisibility();
+  else if(k==='tunit'){Object.values(charts).forEach(clearChart);labelCharts();buildAlertCards();render();updateAlarms()}
+  else if(k==='roller'||k==='gaugeMax'){S.pull=S.rpm*Math.PI*(P.roller/1000);render()}
+  else if(k==='hyst')sendFan();
+  else if(k==='repeat'){if(AL.timer){clearInterval(AL.timer);AL.timer=setInterval(beep,P.repeat*1000)}}
+  else if(k==='notif'){if(P.notif){if(!('Notification'in window)){setPref('notif',false);buildSettings();return toast(T('t_denied'))}
+      Notification.requestPermission().then(r=>{if(r!=='granted'){setP('notif',false);buildSettings();toast(T('t_denied'))}})}}
+  else if(k==='wake')wakeSet(P.wake);
+  else if(k==='pollMs'){if(S.mode==='http'&&want)startHttp(want.ip)}
+  else if(k==='points')resizeCharts();
+  else if(k==='logEvery'||k==='logMax')S.log=S.log.slice(0,P.logMax)}
+function applyVisibility(){$$('[data-card]').forEach(e=>e.hidden=!P.cards[e.dataset.card]);$$('[data-chart]').forEach(e=>e.hidden=!P.charts[e.dataset.chart])}
+let wl=null;async function wakeSet(on){try{if(on&&'wakeLock'in navigator){wl=await navigator.wakeLock.request('screen')}else if(wl){await wl.release();wl=null}}catch(e){}}
+document.addEventListener('visibilitychange',()=>{if(P.wake&&document.visibilityState==='visible')wakeSet(true)});
+
+const sb=$('#setBody');
+sb.addEventListener('click',e=>{
+  const s=e.target.closest('[data-s]');if(s){const k=s.dataset.s;setPref(k,!getP(k));s.classList.toggle('on',getP(k));return}
+  const g=e.target.closest('[data-seg] button');if(g){const k=g.parentElement.dataset.seg,cur=getP(k);let v=g.dataset.v;if(typeof cur==='number')v=Number(v);setPref(k,v);if(k!=='lang')g.parentElement.querySelectorAll('button').forEach(x=>x.classList.toggle('a',x===g));return}
+  const a=e.target.closest('[data-acc]');if(a){setPref('accent',a.dataset.acc);buildSettings();return}
+  const act=e.target.closest('[data-act]');if(act)return doAct(act.dataset.act,act)});
+sb.addEventListener('input',e=>{
+  const r=e.target.closest('[data-r]');if(r){const k=r.dataset.r,v=Number(r.value);setPref(k,v);const it=SET.flatMap(x=>x.items||[]).find(i=>i.k===k);$('#rv-'+k.replace('.','_')).textContent=v+(it.unit||'');return}
+  const c=e.target.closest('[data-accc]');if(c){P.accent='custom';P.accentCustom=c.value;LS.set('kreativ_prefs',P);applyTheme()}});
+sb.addEventListener('change',e=>{
+  const n=e.target.closest('[data-n]');if(n){const it=SET.flatMap(x=>x.items||[]).find(i=>i.k===n.dataset.n);let v=parseFloat(n.value);if(isNaN(v))v=getP(n.dataset.n);v=Math.max(it.min,Math.min(it.max,v));n.value=v;setPref(n.dataset.n,v);return}
+  const t=e.target.closest('[data-t]');if(t)setPref(t.dataset.t,t.value);
+  const c=e.target.closest('[data-accc]');if(c)buildSettings()});
+$('#setChips').addEventListener('click',e=>{const j=e.target.closest('[data-jump]');if(j)$('#'+j.dataset.jump).scrollIntoView({behavior:P.anim?'smooth':'auto',block:'start'})});
+let confirmT={};
+function doAct(a,btn){
+  if(a==='testsnd'){beep();return}
+  if(a==='csv')return exportCSV('log');if(a==='csva')return exportCSV('alerts');if(a==='pdf')return exportPDF();
+  if(a==='clear'||a==='reset'){const key=a;if(!confirmT[key]){confirmT[key]=setTimeout(()=>{confirmT[key]=0;btn.innerHTML=H(a==='clear'?'b_clear':'b_reset')},3000);btn.textContent=T('t_confirm');return}
+    clearTimeout(confirmT[key]);confirmT[key]=0;
+    if(a==='clear'){S.log=[];S.alerts=[];S.yarnLog=[];render();toast(T('t_cleared'))}
+    else{try{localStorage.removeItem('kreativ_prefs');localStorage.removeItem('kreativ_cfg')}catch(e){}P=JSON.parse(JSON.stringify(PD));CFG=JSON.parse(JSON.stringify(CFG_DEF));initUI();toast(T('t_reset'))}
+    btn.innerHTML=H(a==='clear'?'b_clear':'b_reset')}}
+
+/* ---------- export ---------- */
+function download(name,text,type){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['﻿'+text],{type}));a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},500)}
+function exportCSV(kind){
+  const q=v=>'"'+String(v).replace(/"/g,'""')+'"';let rows;
+  if(kind==='log'){if(!S.log.length)return toast(T('t_none'));rows=[['time','rpm','temp_C','humidity_%','vout_V','yarn'].join(',')].concat(S.log.slice().reverse().map(l=>[q(new Date(l.ts).toISOString()),l.rpm,l.temp,l.hum,l.vout,l.yarn?'OK':'BROKEN'].join(',')))}
+  else{if(!S.alerts.length)return toast(T('t_none'));rows=['time,message_ar,message_en'].concat(S.alerts.slice().reverse().map(a=>[q(new Date(a.ts).toISOString()),q(a.ar),q(a.en)].join(',')))}
+  download('control-'+kind+'-'+Date.now()+'.csv',rows.join('\r\n'),'text/csv;charset=utf-8')}
+function exportPDF(){
+  const c=CFG,rows=S.log.slice(0,60).map(l=>`<tr><td>${fmt(l.ts)}</td><td>${l.rpm}</td><td>${fmtT(l.temp)}</td><td>${l.hum}</td><td>${l.vout}</td><td>${l.yarn?L('سليم','OK'):L('مقطوع','Broken')}</td></tr>`).join('')||`<tr><td colspan=6>—</td></tr>`;
+  const al=S.alerts.slice(0,100).map(a=>`<tr><td>${fmt(a.ts)}</td><td>${esc(L(a.ar,a.en))}</td></tr>`).join('')||`<tr><td colspan=2>—</td></tr>`;
+  const yl=S.yarnLog.map(l=>`<tr><td>${l.n}</td><td>${fmt(l.ts)}</td><td>${l.rpm}</td></tr>`).join('')||`<tr><td colspan=3>—</td></tr>`;
+  const rp=$('#report');rp.dir=P.lang==='en'?'ltr':'rtl';
+  rp.innerHTML=`<h2 style="text-align:center">${L('تقرير Control · Ghønim الصناعي','Control · Ghønim industrial report')}</h2><p style="text-align:center">${fmt(Date.now())} — ${$('#connTxt').textContent}</p><hr>
+  <p>${L('الحالة','Status')}: <b>${S.power?L('يعمل','Running'):L('متوقف','Stopped')}</b> | ${L('الخيط','Yarn')}: <b>${S.yarn?L('سليم','OK'):L('مقطوع','Broken')}</b> | ${L('الانقطاعات','Breaks')}: <b>${S.yarnCount}</b> | RPM: <b>${Math.round(S.rpm)}</b> | ${L('الحرارة','Temp')}: <b>${fmtT(S.temp)}${TU()}</b> | ${L('الرطوبة','Humidity')}: <b>${Math.round(S.hum)}%</b> | V: <b>${S.vout.toFixed(2)}</b></p>
+  <p>${L('حدود التنبيه','Alert limits')}: RPM ${c.rpm.min}–${c.rpm.max} | ${L('الحرارة','Temp')} ${fmtT(c.temp.min)}–${fmtT(c.temp.max)}${TU()} | ${L('الرطوبة','Humidity')} ${c.hum.min}–${c.hum.max}%</p>
+  <h3>${L('سجل القراءات','Readings log')}</h3><table><tr><th>${T('time')}</th><th>RPM</th><th>${TU()}</th><th>%</th><th>V</th><th>${L('الخيط','Yarn')}</th></tr>${rows}</table>
+  <h3>${L('سجل التنبيهات','Alerts log')}</h3><table><tr><th>${T('time')}</th><th>${L('التنبيه','Alert')}</th></tr>${al}</table>
+  <h3>${L('سجل قطع الخيط','Yarn-break log')}</h3><table><tr><th>#</th><th>${T('time')}</th><th>RPM</th></tr>${yl}</table>
+  <hr><p style="text-align:center;margin-top:18px"><b>تم التصميم والبرمجة بواسطة المهندس / محمد غنيم</b><br>Developed &amp; Engineered by Mohamed Ghonim</p>`;
+  toast(T('t_pdf'));
+  html2pdf().set({margin:8,filename:'Control-Report-'+Date.now()+'.pdf',image:{type:'jpeg',quality:.95},html2canvas:{scale:2},jsPDF:{unit:'mm',format:'a4'}}).from(rp).save().then(()=>toast(T('t_pdf_ok')))}
+$('#navPdf').onclick=()=>{$('#drawer').classList.remove('open');exportPDF()};
+$('#navCsv').onclick=()=>{$('#drawer').classList.remove('open');exportCSV('log')};
+
+/* ---------- PWA: service worker + install ---------- */
+if('serviceWorker'in navigator&&location.protocol.startsWith('http'))navigator.serviceWorker.register('sw.js').catch(()=>{});
+let dp=null;addEventListener('beforeinstallprompt',e=>{e.preventDefault();dp=e;$('#navInstall').style.display='flex'});
+$('#navInstall').onclick=async()=>{if(!dp)return;dp.prompt();await dp.userChoice;dp=null;$('#navInstall').style.display='none'};
+
+/* ---------- boot ---------- */
+function initUI(){
+  ['theme','glass','fs','radius','density','anim','tabbar'].forEach(applyPref);
+  applyLang();applyVisibility();buildSettings();buildAlertCards();labelTests();
+  if(charts){Object.values(charts).forEach(c=>c.destroy())}buildCharts();
+  $('#ipIn').value=P.lastIp||'';render();renderAlarms();updateAlarms();setConn(S.mode)}
+function boot(){
+  readCV();applyPref('theme');initUI();
+  if(P.startMode==='last'&&P.lastIp&&(P.lastMode==='ws'||P.lastMode==='http')){want={mode:P.lastMode,ip:P.lastIp};P.lastMode==='ws'?connWs(P.lastIp,true):startHttp(P.lastIp)}
+  else if(P.startMode==='demo')setConn('demo');else setConn('none');
+  if(P.wake)wakeSet(true);
+  const h=location.hash.slice(1);if(h&&$('#v-'+h))go(h,false);else{try{history.replaceState({v:'home'},'','#home')}catch(e){}}}
+boot();
+</script>
+</body>
+</html>
